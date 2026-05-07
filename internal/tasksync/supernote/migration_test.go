@@ -71,6 +71,7 @@ func testMigrationDB(t *testing.T) *sql.DB {
 			remote_etag TEXT,
 			last_pushed_at INTEGER,
 			last_pulled_at INTEGER,
+			last_seen_at INTEGER NOT NULL DEFAULT 0,
 			PRIMARY KEY (task_id, adapter_id)
 		)
 	`)

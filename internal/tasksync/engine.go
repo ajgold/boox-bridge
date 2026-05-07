@@ -232,8 +232,10 @@ func (e *SyncEngine) reconcile(ctx context.Context, adapter DeviceAdapter) error
 		if entry.RemoteID == "" {
 			continue // Never pushed — skip hard-delete detection
 		}
-		if entry.LastPulled == 0 {
-			continue // Never seen in a Pull — task may not have propagated yet
+		if entry.LastSeen == 0 {
+			continue // Never observed in a Pull — task may not have propagated
+			// yet, or the remote silently rejected our push. Either way, give
+			// it grace; don't soft-delete prematurely.
 		}
 		if !remoteIDs[entry.RemoteID] {
 			// Remote task gone — soft-delete locally
@@ -253,47 +255,60 @@ func (e *SyncEngine) reconcile(ctx context.Context, adapter DeviceAdapter) error
 		return fmt.Errorf("find local changes: %w", err)
 	}
 
-	// 6. Push local changes
+	// 6. Push local changes. The adapter contract states that PushResult is
+	//    only emitted for changes that the remote actually confirmed; any
+	//    change absent from results was rejected (e.g., SPC returned
+	//    success=false). We must only update the sync map for confirmed
+	//    items, otherwise we accumulate phantom entries that will never be
+	//    cleaned up by the hard-delete detector.
 	if len(changes) > 0 {
 		results, err := adapter.Push(ctx, changes)
 		if err != nil {
 			return fmt.Errorf("push: %w", err)
 		}
-		// Update sync map after successful push using server-assigned remote IDs
 		now := time.Now().UnixMilli()
 		resultByTaskID := make(map[string]PushResult, len(results))
 		for _, r := range results {
 			resultByTaskID[r.TaskID] = r
 		}
+		changeByTaskID := make(map[string]Change, len(changes))
 		for _, c := range changes {
+			changeByTaskID[c.TaskID] = c
+		}
+		for taskID, r := range resultByTaskID {
+			c, ok := changeByTaskID[taskID]
+			if !ok {
+				continue
+			}
 			if c.Type == ChangeDelete {
 				if err := e.syncMap.DeleteByTaskID(ctx, c.TaskID, adapterID); err != nil {
 					e.logger.Warn("delete sync map after push failed", "task_id", c.TaskID, "error", err)
 				}
-			} else {
-				remoteID := c.RemoteID
-				if r, ok := resultByTaskID[c.TaskID]; ok && r.RemoteID != "" {
-					remoteID = r.RemoteID
-				}
-				
-				remoteETag := ""
-				lastPulled := int64(0)
-				entry, _ := e.syncMap.GetByTaskID(ctx, c.TaskID, adapterID)
-				if entry != nil {
-					remoteETag = entry.RemoteETag
-					lastPulled = entry.LastPulled
-				}
-
-				if err := e.syncMap.Upsert(ctx, &SyncMapEntry{
-					TaskID:     c.TaskID,
-					AdapterID:  adapterID,
-					RemoteID:   remoteID,
-					RemoteETag: remoteETag,
-					LastPushed: now,
-					LastPulled: lastPulled,
-				}); err != nil {
-					e.logger.Warn("upsert sync map after push failed", "task_id", c.TaskID, "error", err)
-				}
+				continue
+			}
+			remoteID := c.RemoteID
+			if r.RemoteID != "" {
+				remoteID = r.RemoteID
+			}
+			remoteETag := ""
+			lastPulled := int64(0)
+			lastSeen := int64(0)
+			entry, _ := e.syncMap.GetByTaskID(ctx, c.TaskID, adapterID)
+			if entry != nil {
+				remoteETag = entry.RemoteETag
+				lastPulled = entry.LastPulled
+				lastSeen = entry.LastSeen
+			}
+			if err := e.syncMap.Upsert(ctx, &SyncMapEntry{
+				TaskID:     c.TaskID,
+				AdapterID:  adapterID,
+				RemoteID:   remoteID,
+				RemoteETag: remoteETag,
+				LastPushed: now,
+				LastPulled: lastPulled,
+				LastSeen:   lastSeen,
+			}); err != nil {
+				e.logger.Warn("upsert sync map after push failed", "task_id", c.TaskID, "error", err)
 			}
 		}
 	}
@@ -328,14 +343,18 @@ func (e *SyncEngine) processRemoteTask(ctx context.Context, adapterID string, rt
 			RemoteETag: rt.ETag,
 			LastPushed: 0,
 			LastPulled: now,
+			LastSeen:   now,
 		})
 	}
 
 	// Existing task — check if remote changed
 	if entry.RemoteETag == rt.ETag {
-		// Remote unchanged, but seeing it in Pull is proof of life:
-		// bump LastPulled so the next cycle's hard-delete detector
-		// doesn't ignore this entry as "never pulled".
+		// Remote unchanged. Bump LastSeen as proof-of-life so the
+		// hard-delete detector knows we've observed the entry, but DO NOT
+		// bump LastPulled — there is no remote change to apply, and bumping
+		// LastPulled would mask any unpushed local edit from
+		// findLocalChanges (which uses max(LastPushed, LastPulled) as the
+		// "synced as of" cutoff).
 		now := time.Now().UnixMilli()
 		return e.syncMap.Upsert(ctx, &SyncMapEntry{
 			TaskID:     entry.TaskID,
@@ -343,7 +362,8 @@ func (e *SyncEngine) processRemoteTask(ctx context.Context, adapterID string, rt
 			RemoteID:   rt.RemoteID,
 			RemoteETag: rt.ETag,
 			LastPushed: entry.LastPushed,
-			LastPulled: now,
+			LastPulled: entry.LastPulled,
+			LastSeen:   now,
 		})
 	}
 
@@ -381,6 +401,7 @@ func (e *SyncEngine) processRemoteTask(ctx context.Context, adapterID string, rt
 		RemoteETag: rt.ETag,
 		LastPushed: entry.LastPushed,
 		LastPulled: now,
+		LastSeen:   now,
 	})
 }
 

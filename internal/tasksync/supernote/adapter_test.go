@@ -669,3 +669,75 @@ func TestAdapter_Stop(t *testing.T) {
 		t.Errorf("Stop failed: %v", err)
 	}
 }
+
+// TestClient_BugFix_CreateChecksSuccess verifies that the client returns an
+// error when SPC's response body has success=false. Previously the success
+// field was decoded but never checked, so silent rejections looked like
+// success and produced phantom sync_map entries.
+func TestClient_BugFix_CreateChecksSuccess(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.RequestURI {
+		case "/api/official/user/query/random/code":
+			json.NewEncoder(w).Encode(map[string]any{"success": true, "randomCode": "x", "timestamp": int64(1)})
+		case "/api/official/user/account/login/new":
+			json.NewEncoder(w).Encode(map[string]any{"success": true, "token": "tok"})
+		case "/api/file/schedule/task":
+			// SPC says no.
+			json.NewEncoder(w).Encode(map[string]any{
+				"success":  false,
+				"code":     "OUT_OF_LIMIT",
+				"errorMsg": "task quota exceeded",
+			})
+		default:
+			t.Fatalf("unexpected path: %s", r.RequestURI)
+		}
+	}))
+	defer server.Close()
+
+	c := NewClient(server.URL, "u", "p", testLogger())
+	ctx := context.Background()
+	if err := c.Login(ctx); err != nil {
+		t.Fatalf("Login: %v", err)
+	}
+	err := c.CreateTask(ctx, SPCTask{ID: "x", Title: "test"})
+	if err == nil {
+		t.Fatal("expected CreateTask to error on success=false, got nil")
+	}
+	if !strings.Contains(err.Error(), "OUT_OF_LIMIT") || !strings.Contains(err.Error(), "task quota exceeded") {
+		t.Errorf("expected error to surface SPC code+message, got %q", err.Error())
+	}
+}
+
+// TestClient_BugFix_UpdateChecksSuccess: same guarantee for the bulk update.
+func TestClient_BugFix_UpdateChecksSuccess(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.RequestURI {
+		case "/api/official/user/query/random/code":
+			json.NewEncoder(w).Encode(map[string]any{"success": true, "randomCode": "x", "timestamp": int64(1)})
+		case "/api/official/user/account/login/new":
+			json.NewEncoder(w).Encode(map[string]any{"success": true, "token": "tok"})
+		case "/api/file/schedule/task/list":
+			json.NewEncoder(w).Encode(map[string]any{
+				"success":  false,
+				"code":     "INVALID_TASK_LIST",
+				"errorMsg": "one or more tasks not found",
+			})
+		default:
+			t.Fatalf("unexpected path: %s", r.RequestURI)
+		}
+	}))
+	defer server.Close()
+
+	c := NewClient(server.URL, "u", "p", testLogger())
+	ctx := context.Background()
+	if err := c.Login(ctx); err != nil {
+		t.Fatalf("Login: %v", err)
+	}
+	err := c.UpdateTasks(ctx, []SPCTask{{ID: "x", Title: "test"}})
+	if err == nil {
+		t.Fatal("expected UpdateTasks to error on success=false, got nil")
+	}
+	if !strings.Contains(err.Error(), "INVALID_TASK_LIST") {
+		t.Errorf("expected error to surface SPC code, got %q", err.Error())
+	}
+}

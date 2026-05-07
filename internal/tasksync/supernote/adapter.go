@@ -62,6 +62,7 @@ func (a *Adapter) Pull(ctx context.Context, since string) ([]tasksync.RemoteTask
 
 func (a *Adapter) Push(ctx context.Context, changes []tasksync.Change) ([]tasksync.PushResult, error) {
 	var updateBatch []SPCTask
+	var pendingUpdateResults []tasksync.PushResult
 	var results []tasksync.PushResult
 
 	for _, c := range changes {
@@ -80,7 +81,7 @@ func (a *Adapter) Push(ctx context.Context, changes []tasksync.Change) ([]tasksy
 		case tasksync.ChangeUpdate:
 			spc := RemoteToSPCTask(c.Remote, c.RemoteID)
 			updateBatch = append(updateBatch, spc)
-			results = append(results, tasksync.PushResult{
+			pendingUpdateResults = append(pendingUpdateResults, tasksync.PushResult{
 				TaskID:   c.TaskID,
 				RemoteID: c.RemoteID,
 			})
@@ -88,14 +89,23 @@ func (a *Adapter) Push(ctx context.Context, changes []tasksync.Change) ([]tasksy
 		case tasksync.ChangeDelete:
 			if err := a.client.DeleteTask(ctx, c.RemoteID); err != nil {
 				a.logger.Warn("push delete failed", "task_id", c.TaskID, "error", err)
+				continue
 			}
+			results = append(results, tasksync.PushResult{
+				TaskID:   c.TaskID,
+				RemoteID: c.RemoteID,
+			})
 		}
 	}
 
-	// Bulk update
+	// Bulk update — only confirm the update results if the batch succeeds.
+	// SPC's bulk endpoint is all-or-nothing, so on failure we drop the entire
+	// batch from results rather than reporting partial success.
 	if len(updateBatch) > 0 {
 		if err := a.client.UpdateTasks(ctx, updateBatch); err != nil {
-			return results, fmt.Errorf("bulk update: %w", err)
+			a.logger.Warn("push bulk update failed", "count", len(updateBatch), "error", err)
+		} else {
+			results = append(results, pendingUpdateResults...)
 		}
 	}
 

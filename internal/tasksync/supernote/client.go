@@ -99,28 +99,58 @@ func (c *Client) Login(ctx context.Context) error {
 func (c *Client) FetchTasks(ctx context.Context) ([]SPCTask, error) {
 	var resp struct {
 		Success      bool      `json:"success"`
+		ErrorMsg     string    `json:"errorMsg"`
+		Code         string    `json:"code"`
 		ScheduleTask []SPCTask `json:"scheduleTask"`
 	}
 	if err := c.postJSON(ctx, "/api/file/schedule/task/all", map[string]any{}, &resp, true); err != nil {
 		return nil, fmt.Errorf("fetch tasks: %w", err)
 	}
+	if !resp.Success {
+		return nil, fmt.Errorf("fetch tasks: SPC rejected (code=%q msg=%q)", resp.Code, resp.ErrorMsg)
+	}
 	return resp.ScheduleTask, nil
 }
 
-// CreateTask creates a single task on SPC.
+// CreateTask creates a single task on SPC. Returns an error if SPC reports
+// success=false in the response body — historically that signal was ignored,
+// which produced phantom sync_map entries with no corresponding remote task.
 func (c *Client) CreateTask(ctx context.Context, task SPCTask) error {
-	var resp struct{ Success bool `json:"success"` }
-	return c.postJSON(ctx, "/api/file/schedule/task", task, &resp, true)
+	var resp struct {
+		Success  bool   `json:"success"`
+		ErrorMsg string `json:"errorMsg"`
+		Code     string `json:"code"`
+	}
+	if err := c.postJSON(ctx, "/api/file/schedule/task", task, &resp, true); err != nil {
+		return err
+	}
+	if !resp.Success {
+		return fmt.Errorf("SPC rejected create (code=%q msg=%q)", resp.Code, resp.ErrorMsg)
+	}
+	return nil
 }
 
 // UpdateTasks performs a bulk update of tasks on SPC.
 func (c *Client) UpdateTasks(ctx context.Context, tasks []SPCTask) error {
 	body := map[string]any{"updateScheduleTaskList": tasks}
-	var resp struct{ Success bool `json:"success"` }
-	return c.doRequest(ctx, "PUT", "/api/file/schedule/task/list", body, &resp, true, false)
+	var resp struct {
+		Success  bool   `json:"success"`
+		ErrorMsg string `json:"errorMsg"`
+		Code     string `json:"code"`
+	}
+	if err := c.doRequest(ctx, "PUT", "/api/file/schedule/task/list", body, &resp, true, false); err != nil {
+		return err
+	}
+	if !resp.Success {
+		return fmt.Errorf("SPC rejected update (code=%q msg=%q)", resp.Code, resp.ErrorMsg)
+	}
+	return nil
 }
 
-// DeleteTask deletes a task on SPC by ID.
+// DeleteTask deletes a task on SPC by ID. SPC's DELETE response body shape
+// hasn't been fully reverse-engineered — sometimes empty, sometimes the
+// success envelope. We rely on the HTTP status check inside doRequest;
+// passing nil as the result keeps Decode from erroring on an empty body.
 func (c *Client) DeleteTask(ctx context.Context, taskID string) error {
 	path := "/api/file/schedule/task/" + taskID
 	return c.doRequest(ctx, "DELETE", path, nil, nil, true, false)

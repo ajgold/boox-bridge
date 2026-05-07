@@ -49,6 +49,11 @@ type mockAdapter struct {
 	pulls     []mockPull
 	pushes    [][]Change
 	nextToken string
+
+	// failCreate, when true, simulates a silent remote rejection of Create
+	// changes: the change is omitted from PushResult and the task is NOT
+	// stored in m.tasks. Mirrors SPC returning success=false on /task POST.
+	failCreate bool
 }
 
 type mockPull struct {
@@ -108,6 +113,9 @@ func (m *mockAdapter) Push(ctx context.Context, changes []Change) ([]PushResult,
 	for _, c := range changes {
 		r := PushResult{TaskID: c.TaskID}
 		if c.Type == ChangeCreate {
+			if m.failCreate {
+				continue // simulate silent rejection — no result, no stored task
+			}
 			// Simulate server assigning a remote ID
 			r.RemoteID = "remote-" + c.TaskID[:8]
 			stored := c.Remote
@@ -760,5 +768,188 @@ func TestSyncEngine_ManualTrigger(t *testing.T) {
 	}
 	if len(tasks) != 1 {
 		t.Errorf("expected 1 task after manual trigger, got %d", len(tasks))
+	}
+}
+
+// TestSyncEngine_BugFix_SilentPushFailureNoSyncMapEntry verifies that when
+// the adapter's Push silently drops a Create (no PushResult emitted —
+// equivalent to SPC returning success=false), the engine does not record a
+// sync_map entry for that task. Historically the engine iterated `changes`
+// instead of `results`, so failed creates produced phantom sync_map rows
+// with locally-generated remote_ids that SPC never echoed back, and which
+// the hard-delete detector then refused to clean up.
+func TestSyncEngine_BugFix_SilentPushFailureNoSyncMapEntry(t *testing.T) {
+	db := openTestDB(t)
+	store := taskdb.NewStore(db)
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+	engine := NewSyncEngine(store, db, logger, 1*time.Hour)
+
+	adapter := newMockAdapter("test-adapter")
+	adapter.failCreate = true
+	engine.RegisterAdapter(adapter)
+
+	ctx := context.Background()
+	if err := engine.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer engine.Stop()
+
+	localTask := &taskstore.Task{
+		Title:        taskstore.SqlStr("Phantom"),
+		Status:       taskstore.SqlStr("needsAction"),
+		IsDeleted:    "N",
+		IsReminderOn: "N",
+	}
+	if err := store.Create(ctx, localTask); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	beforeTs := engine.Status().LastSyncAt
+	engine.TriggerSync()
+	waitForSync(t, engine, beforeTs)
+
+	syncMap := NewSyncMap(db)
+	entry, err := syncMap.GetByTaskID(ctx, localTask.TaskID, "test-adapter")
+	if err != nil {
+		t.Fatalf("GetByTaskID: %v", err)
+	}
+	if entry != nil {
+		t.Errorf("expected no sync_map entry after silent push failure, got %+v", entry)
+	}
+}
+
+// TestSyncEngine_BugFix_LocalEditNotMaskedByETagMatchPull verifies that a
+// local edit between syncs is still pushed even after a no-op (ETag-match)
+// pull. Previously the engine bumped LastPulled to "now" on every observed
+// pull, which advanced the findLocalChanges cutoff past the local
+// modification timestamp and silently dropped the edit forever.
+func TestSyncEngine_BugFix_LocalEditNotMaskedByETagMatchPull(t *testing.T) {
+	db := openTestDB(t)
+	store := taskdb.NewStore(db)
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+	engine := NewSyncEngine(store, db, logger, 1*time.Hour)
+
+	adapter := newMockAdapter("test-adapter")
+	initial := RemoteTask{
+		RemoteID: "remote-task-1",
+		Title:    "Initial",
+		Status:   "needsAction",
+		ETag:     "etag-1",
+	}
+	adapter.setInitialTasks([]RemoteTask{initial})
+	engine.RegisterAdapter(adapter)
+
+	ctx := context.Background()
+	if err := engine.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer engine.Stop()
+
+	// First sync: import the remote task into local store.
+	beforeTs := engine.Status().LastSyncAt
+	engine.TriggerSync()
+	waitForSync(t, engine, beforeTs)
+
+	tasks, err := store.List(ctx)
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(tasks) != 1 {
+		t.Fatalf("expected 1 task after import, got %d", len(tasks))
+	}
+	imported := tasks[0]
+
+	// Wait a tick so localModified after the edit is strictly later than
+	// the import's LastPulled — otherwise the millisecond-resolution clock
+	// can blur the ordering.
+	time.Sleep(5 * time.Millisecond)
+
+	// User edits the task locally.
+	imported.Status = taskstore.SqlStr("completed")
+	if err := store.Update(ctx, &imported); err != nil {
+		t.Fatalf("Update: %v", err)
+	}
+
+	// Second sync: remote unchanged (same ETag). Engine should still
+	// detect the local edit and push it.
+	adapter.pushes = nil
+	beforeTs = engine.Status().LastSyncAt
+	engine.TriggerSync()
+	waitForSync(t, engine, beforeTs)
+
+	if len(adapter.pushes) != 1 || len(adapter.pushes[0]) != 1 {
+		t.Fatalf("expected 1 push with 1 change after local edit, got pushes=%v", adapter.pushes)
+	}
+	change := adapter.pushes[0][0]
+	if change.Type != ChangeUpdate {
+		t.Errorf("expected ChangeUpdate, got %v", change.Type)
+	}
+	if change.Remote.Status != "completed" {
+		t.Errorf("expected pushed status=completed, got %q", change.Remote.Status)
+	}
+}
+
+// TestSyncEngine_BugFix_PhantomEntryNotHardDeleted verifies that an entry
+// pushed but never observed in a pull (LastSeen == 0) is NOT
+// hard-delete-detected. This protects freshly-pushed tasks from being
+// soft-deleted before the remote has propagated and echoed them back.
+// Pre-existing phantoms (from the silent-failure era) also stay in place
+// rather than thrashing through a re-create loop.
+func TestSyncEngine_BugFix_PhantomEntryNotHardDeleted(t *testing.T) {
+	db := openTestDB(t)
+	store := taskdb.NewStore(db)
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+	engine := NewSyncEngine(store, db, logger, 1*time.Hour)
+
+	ctx := context.Background()
+
+	localTask := &taskstore.Task{
+		Title:        taskstore.SqlStr("Just-pushed task"),
+		Status:       taskstore.SqlStr("needsAction"),
+		IsDeleted:    "N",
+		IsReminderOn: "N",
+	}
+	if err := store.Create(ctx, localTask); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	syncMap := NewSyncMap(db)
+	if err := syncMap.Upsert(ctx, &SyncMapEntry{
+		TaskID:     localTask.TaskID,
+		AdapterID:  "test-adapter",
+		RemoteID:   "r-orphan-1",
+		LastPushed: time.Now().UnixMilli(),
+		LastPulled: 0,
+		LastSeen:   0,
+	}); err != nil {
+		t.Fatalf("Upsert: %v", err)
+	}
+
+	// Adapter has no remote tasks — pull returns empty.
+	adapter := newMockAdapter("test-adapter")
+	engine.RegisterAdapter(adapter)
+	if err := engine.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer engine.Stop()
+
+	beforeTs := engine.Status().LastSyncAt
+	engine.TriggerSync()
+	waitForSync(t, engine, beforeTs)
+
+	got, err := store.Get(ctx, localTask.TaskID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got.IsDeleted == "Y" {
+		t.Error("phantom entry (LastSeen=0) should not have been soft-deleted")
+	}
+
+	entry, err := syncMap.GetByTaskID(ctx, localTask.TaskID, "test-adapter")
+	if err != nil {
+		t.Fatalf("GetByTaskID: %v", err)
+	}
+	if entry == nil {
+		t.Error("phantom sync_map entry should be preserved (not auto-cleaned)")
 	}
 }
