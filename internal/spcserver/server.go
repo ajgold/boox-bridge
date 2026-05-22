@@ -13,6 +13,7 @@ import (
 	"github.com/sysop/ultrabridge/internal/spcserver/auth"
 	"github.com/sysop/ultrabridge/internal/spcserver/handlers"
 	"github.com/sysop/ultrabridge/internal/spcserver/login"
+	"github.com/sysop/ultrabridge/internal/spcserver/socketio"
 )
 
 // Config holds the SPC server's runtime configuration, populated from appconfig
@@ -34,16 +35,17 @@ type Config struct {
 	Logger         *slog.Logger
 }
 
-// Server is the SPC HTTP (and, from 1c, Engine.IO) server. It is constructed
-// only when Mode == "server"; in "client" mode main.go never calls New.
+// Server is the SPC HTTP + Engine.IO server, both served on one listener. It is
+// constructed only when Mode == "server"; in "client" mode main.go never calls New.
 type Server struct {
 	cfg Config
 	mux *http.ServeMux
+	reg *socketio.Registry
 }
 
 // New builds the server, registering all routes on its mux.
 func New(cfg Config) *Server {
-	s := &Server{cfg: cfg, mux: http.NewServeMux()}
+	s := &Server{cfg: cfg, mux: http.NewServeMux(), reg: socketio.NewRegistry()}
 	s.registerRoutes()
 	return s
 }
@@ -51,6 +53,10 @@ func New(cfg Config) *Server {
 // Handler exposes the mux for in-process tests (httptest) without binding a
 // socket.
 func (s *Server) Handler() http.Handler { return s.mux }
+
+// SocketRegistry returns the Engine.IO connection registry so other subsystems
+// (e.g. the 1d STARTSYNC notifier) can push events to connected devices.
+func (s *Server) SocketRegistry() *socketio.Registry { return s.reg }
 
 // registerRoutes wires the device-facing endpoints. Go 1.22 method+path
 // patterns match the routing style already used in cmd/ultrabridge/main.go.
@@ -83,6 +89,10 @@ func (s *Server) registerRoutes() {
 	// Protected probe — requires a valid x-access-token (1b).
 	s.mux.Handle("POST /api/user/query",
 		auth.Middleware(s.cfg.JWTSecret, store, http.HandlerFunc(handlers.UserQuery)))
+
+	// Engine.IO v3 websocket on the same listener (1c). The device connects to
+	// /socket.io/ directly over websocket; demux is by path.
+	s.mux.Handle("/socket.io/", socketio.NewHandler(s.cfg.JWTSecret, s.reg, s.cfg.Logger))
 }
 
 // Run binds the listener and serves until error. TLS is used when both cert and
