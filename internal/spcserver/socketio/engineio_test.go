@@ -38,6 +38,24 @@ func TestEncodeOpen(t *testing.T) {
 	}
 }
 
+// TestEncodeEvent verifies the Socket.IO event frame: "42" + ["name",payload],
+// and "42"+["name"] when payload is nil.
+func TestEncodeEvent(t *testing.T) {
+	withPay := string(EncodeEvent("ratta_ping", "Received"))
+	if withPay != `42["ratta_ping","Received"]` {
+		t.Errorf("with payload: got %q", withPay)
+	}
+	noPay := string(EncodeEvent("ratta_ping", nil))
+	if noPay != `42["ratta_ping"]` {
+		t.Errorf("no payload: got %q", noPay)
+	}
+	// round-trips through the classifier
+	kind, event, _ := ClassifyFrame(EncodeEvent("ServerMessage", map[string]string{"k": "v"}))
+	if kind != KindEvent || event != "ServerMessage" {
+		t.Errorf("round-trip: kind=%v event=%q", kind, event)
+	}
+}
+
 func TestClassifyFrame(t *testing.T) {
 	tests := []struct {
 		name      string

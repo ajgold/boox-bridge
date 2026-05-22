@@ -63,6 +63,18 @@ func EncodeOpen(sid string) []byte {
 	return append([]byte{eioOpen}, b...)
 }
 
+// EncodeEvent builds a Socket.IO event frame: "42" + ["name", payload]. When
+// payload is nil only the name is emitted (42["name"]), matching the device's
+// ratta_ping shape.
+func EncodeEvent(event string, payload any) []byte {
+	arr := []any{event}
+	if payload != nil {
+		arr = append(arr, payload)
+	}
+	b, _ := json.Marshal(arr)
+	return append([]byte("42"), b...)
+}
+
 // ClassifyFrame inspects an inbound frame and returns its kind plus, for events
 // ("42[...]"), the event name and raw payload (the second array element, or nil
 // when absent as in 42["ratta_ping"]). The parse is tolerant: a malformed event
