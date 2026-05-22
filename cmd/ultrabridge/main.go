@@ -27,7 +27,6 @@ import (
 	"github.com/sysop/ultrabridge/internal/booxpipeline"
 	ubcaldav "github.com/sysop/ultrabridge/internal/caldav"
 	"github.com/sysop/ultrabridge/internal/chat"
-	ubwebdav "github.com/sysop/ultrabridge/internal/webdav"
 	"github.com/sysop/ultrabridge/internal/db"
 	"github.com/sysop/ultrabridge/internal/logging"
 	"github.com/sysop/ultrabridge/internal/mcpauth"
@@ -40,11 +39,13 @@ import (
 	"github.com/sysop/ultrabridge/internal/source"
 	"github.com/sysop/ultrabridge/internal/source/boox"
 	"github.com/sysop/ultrabridge/internal/source/supernote"
+	"github.com/sysop/ultrabridge/internal/spcserver"
 	"github.com/sysop/ultrabridge/internal/sync"
 	"github.com/sysop/ultrabridge/internal/taskdb"
 	"github.com/sysop/ultrabridge/internal/tasksync"
 	snsync "github.com/sysop/ultrabridge/internal/tasksync/supernote"
 	"github.com/sysop/ultrabridge/internal/web"
+	ubwebdav "github.com/sysop/ultrabridge/internal/webdav"
 )
 
 // syncProviderAdapter wraps tasksync.SyncEngine to satisfy web.SyncStatusProvider.
@@ -357,7 +358,6 @@ func main() {
 		os.Exit(1)
 	}
 
-
 	// Start sources
 	var sources []source.Source
 	for _, row := range rows {
@@ -474,8 +474,8 @@ func main() {
 			configDirty = configSvc.IsRestartRequired()
 		}
 		type healthResp struct {
-			Status       string `json:"status"`
-			ConfigDirty  bool   `json:"config_dirty"`
+			Status      string `json:"status"`
+			ConfigDirty bool   `json:"config_dirty"`
 		}
 		json.NewEncoder(w).Encode(healthResp{
 			Status:      "ok",
@@ -541,11 +541,11 @@ func main() {
 
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]interface{}{
-			"issuer":                 baseURL,
-			"authorization_endpoint": baseURL + "/authorize",
-			"token_endpoint":         baseURL + "/token",
-			"response_types_supported": []string{"code"},
-			"grant_types_supported":    []string{"authorization_code"},
+			"issuer":                                baseURL,
+			"authorization_endpoint":                baseURL + "/authorize",
+			"token_endpoint":                        baseURL + "/token",
+			"response_types_supported":              []string{"code"},
+			"grant_types_supported":                 []string{"authorization_code"},
 			"token_endpoint_auth_methods_supported": []string{"none", "client_secret_post"},
 		})
 	})
@@ -593,7 +593,7 @@ func main() {
 			mux.Handle("/webdav/", authMW.Wrap(davHandler))
 			logger.Info("boox webdav enabled", "path", booxNotesPath)
 		}
-		
+
 		booxCachePath := ""
 		if booxNotesPath != "" {
 			booxCachePath = filepath.Join(booxNotesPath, ".cache")
@@ -646,6 +646,25 @@ func main() {
 	// Individual routes are wrapped with auth middleware at registration time.
 	logHandler := logging.RequestID(logger)(mux)
 	handler := web.SetupMiddleware(noteDB, logHandler)
+
+	// Optionally spawn the device-facing SPC server (UB-as-SPC refactor). In
+	// the default "client" mode nothing is started, so UB behaves exactly as
+	// before. Only "server" mode binds the SPC listener.
+	if cfg.SPCMode == "server" {
+		spcSrv := spcserver.New(spcserver.Config{
+			Mode:       cfg.SPCMode,
+			ListenAddr: cfg.SPCListenAddr,
+			TLSCert:    cfg.SPCTLSCert,
+			TLSKey:     cfg.SPCTLSKey,
+			Logger:     logger,
+		})
+		go func() {
+			logger.Info("spc server starting", "addr", cfg.SPCListenAddr, "tls", cfg.SPCTLSCert != "")
+			if err := spcSrv.Run(); err != nil {
+				logger.Error("spc server error", "error", err)
+			}
+		}()
+	}
 
 	// Setup graceful shutdown with signal handling
 	sigChan := make(chan os.Signal, 1)
