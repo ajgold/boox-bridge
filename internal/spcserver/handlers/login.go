@@ -117,6 +117,16 @@ func (h *LoginHandler) FileQueryServer(w http.ResponseWriter, r *http.Request) {
 	envelope.WriteJSON(w, envelope.OK())
 }
 
+// UserQuery is the protected probe wired in 1b: reachable only with a valid
+// x-access-token (via auth.Middleware). It returns a minimal success carrying
+// the authenticated userId from context.
+func UserQuery(w http.ResponseWriter, r *http.Request) {
+	envelope.WriteJSON(w, struct {
+		envelope.BaseVO
+		UserId string `json:"userId"`
+	}{BaseVO: envelope.OK(), UserId: auth.UserID(r.Context())})
+}
+
 // parseUserID converts a decimal userId string to int64, returning 0 on error
 // (UserCheckVO.userId is informational; the device proceeds on success).
 func parseUserID(s string) int64 {

@@ -652,11 +652,15 @@ func main() {
 	// before. Only "server" mode binds the SPC listener.
 	if cfg.SPCMode == "server" {
 		spcSrv := spcserver.New(spcserver.Config{
-			Mode:       cfg.SPCMode,
-			ListenAddr: cfg.SPCListenAddr,
-			TLSCert:    cfg.SPCTLSCert,
-			TLSKey:     cfg.SPCTLSKey,
-			Logger:     logger,
+			Mode:           cfg.SPCMode,
+			ListenAddr:     cfg.SPCListenAddr,
+			TLSCert:        cfg.SPCTLSCert,
+			TLSKey:         cfg.SPCTLSKey,
+			DB:             noteDB,
+			JWTSecret:      cfg.SPCJWTSecret,
+			DeviceAccount:  cfg.SPCDeviceAccount,
+			DevicePassword: cfg.SPCDevicePassword,
+			Logger:         logger,
 		})
 		go func() {
 			logger.Info("spc server starting", "addr", cfg.SPCListenAddr, "tls", cfg.SPCTLSCert != "")
