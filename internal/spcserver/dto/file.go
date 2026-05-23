@@ -165,3 +165,44 @@ type FileQueryV2VO struct {
 	EquipmentNo string     `json:"equipmentNo"`
 	EntriesVO   *EntriesVO `json:"entriesVO"`
 }
+
+// FileDownloadLocalDTO is the download_v3 request
+// (com/ratta/file/dto/FileDownloadLocalDTO.java: equipmentNo, id Long @NotNull).
+// id is the numeric file id from the fileids registry (the device addresses
+// files by the Long id it received in list_folder/query_v3). A pointer so an
+// absent/null id is distinguishable from 0.
+type FileDownloadLocalDTO struct {
+	EquipmentNo string `json:"equipmentNo"`
+	ID          *int64 `json:"id"`
+}
+
+// FileDownloadLocalVO is the download_v3 response
+// (com/ratta/file/vo/FileDownloadLocalVO.java extends BaseVO). url is the
+// presigned /api/oss/download URL the device then GETs. Snake_case wire keys
+// (path_display/content_hash/is_downloadable) match EntriesVO — no @JsonProperty
+// in the Java, so the field names are the wire keys. id is a String here
+// (String-out, Long-in — the SPC id-type split, §8). Size is a pointer so a
+// missing file serializes null rather than 0.
+type FileDownloadLocalVO struct {
+	envelope.BaseVO
+	EquipmentNo    string `json:"equipmentNo"`
+	ID             string `json:"id"`
+	URL            string `json:"url"`
+	Name           string `json:"name"`
+	PathDisplay    string `json:"path_display"`
+	ContentHash    string `json:"content_hash"`
+	Size           *int64 `json:"size"`
+	IsDownloadable bool   `json:"is_downloadable"`
+}
+
+// FileDownloadApplyVO is the response to POST /api/oss/generate/download/url
+// (com/ratta/file/vo/FileDownloadApplyVO.java). NOTE: it implements Serializable
+// only and does NOT extend BaseVO — there is no success/errorCode field; the
+// device reads the bare {url, signature, timestamp, nonce, pathId}.
+type FileDownloadApplyVO struct {
+	URL       string `json:"url"`
+	Signature string `json:"signature"`
+	Timestamp int64  `json:"timestamp"`
+	Nonce     string `json:"nonce"`
+	PathID    string `json:"pathId"`
+}
