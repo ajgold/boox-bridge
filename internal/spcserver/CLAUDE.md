@@ -4,7 +4,7 @@ Last verified: 2026-05-23
 
 Device-facing reimplementation of the Supernote Private Cloud (SPC) protocol so an unmodified Supernote device talks to UltraBridge as if it were the real SPC server.
 
-**Status:** Phase 1 complete and validated on real hardware (Supernote Nomad SN078C10034074, 2026-05-23) — auth/login, the Engine.IO socket, and bidirectional task sync (incl. instant web→device push) all work. Phase 2 (file listing + capacity, **read path**) is code-complete and validated by a no-device login→curl loop (2026-05-23); device acceptance is the remaining 2d step. OSS download/upload/recycle/search are Phases 3–5 (not built). Gated by `UB_SPC_MODE` (default `client` = no listener; `server` = bind `:8089`).
+**Status:** Phase 1 complete and validated on real hardware (Supernote Nomad SN078C10034074, 2026-05-23) — auth/login, the Engine.IO socket, and bidirectional task sync (incl. instant web→device push) all work. Phase 2 (file listing + capacity, **read path**) is complete and validated on real hardware (2026-05-23): the device browsed its native six-folder tree, walked it via `query_v3`, showed a sane capacity meter, and saw no Boox content; it then `download_v3`'d → 404 ("Private Cloud Sync Failed"), the exact read/download boundary. OSS download/upload/recycle/search are Phases 3–5 (not built). Gated by `UB_SPC_MODE` (default `client` = no listener; `server` = bind `:8089`).
 
 ## Layout
 
