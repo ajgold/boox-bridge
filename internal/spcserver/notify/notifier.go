@@ -58,8 +58,13 @@ func (n *SocketNotifier) Notify(ctx context.Context) error {
 		`{"code":"200","timestamp":%d,"msgType":"TASK-SYN","data":[{"messageType":"STARTSYNC","equipmentNo":"ultrabridge","timestamp":%d}]}`,
 		now, now,
 	)
-	if n.reg.Emit(userID, "ServerMessage", payload) == 0 {
-		n.logger.Debug("STARTSYNC: no device connected", "userId", userID)
+	// Emit the "to-do" event (SocketConstant.EVENT_TODO): the device's
+	// TaskService binds "to-do" and its onReceive unconditionally triggers a
+	// task sync. "ServerMessage" is the FILE channel (→ file sync, Phase 2);
+	// using it does not pull tasks. Confirmed from the decompiled task app
+	// (TaskService SocketServiceManager("to-do"), 2026-05-23).
+	if n.reg.Emit(userID, "to-do", payload) == 0 {
+		n.logger.Debug("task STARTSYNC: no device connected", "userId", userID)
 	}
 	return nil
 }

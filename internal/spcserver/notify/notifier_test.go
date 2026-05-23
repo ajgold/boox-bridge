@@ -34,7 +34,7 @@ func TestNotifyEmitsStartSync(t *testing.T) {
 	if err := n.Notify(context.Background()); err != nil {
 		t.Fatalf("Notify: %v", err)
 	}
-	if em.calls != 1 || em.userID != "u1" || em.event != "ServerMessage" {
+	if em.calls != 1 || em.userID != "u1" || em.event != "to-do" {
 		t.Fatalf("emit: calls=%d user=%q event=%q", em.calls, em.userID, em.event)
 	}
 	payload, _ := em.payload.(string)
