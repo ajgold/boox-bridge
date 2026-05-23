@@ -199,6 +199,29 @@ func (h *FileHandler) QueryByPath(w http.ResponseWriter, r *http.Request) {
 	envelope.WriteJSON(w, vo)
 }
 
+// CapacityQuery serves /api/file/capacity/query (the variant the device hits):
+// used = du-sum under the root, total = the configured quota.
+func (h *FileHandler) CapacityQuery(w http.ResponseWriter, r *http.Request) {
+	envelope.WriteJSON(w, dto.CapacityVO{
+		BaseVO:        envelope.OK(),
+		UsedCapacity:  h.Meter.Usage(),
+		TotalCapacity: h.Meter.Quota(),
+	})
+}
+
+// GetSpaceUsage serves /api/file/2/users/get_space_usage. allocationVO.tag is
+// "individual" per FileLocalServiceImpl.queryCapacity.
+func (h *FileHandler) GetSpaceUsage(w http.ResponseWriter, r *http.Request) {
+	var req dto.CapacityLocalDTO
+	_ = json.NewDecoder(r.Body).Decode(&req)
+	envelope.WriteJSON(w, dto.CapacityLocalVO{
+		BaseVO:       envelope.OK(),
+		Used:         h.Meter.Usage(),
+		AllocationVO: dto.AllocationVO{Tag: "individual", Allocated: h.Meter.Quota()},
+		EquipmentNo:  req.EquipmentNo,
+	})
+}
+
 // hasTopLevelFolders reports whether the file root contains at least one
 // subdirectory (the synType signal). An unset or unreadable root → false.
 func (h *FileHandler) hasTopLevelFolders() bool {

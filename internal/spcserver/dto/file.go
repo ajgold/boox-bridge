@@ -29,6 +29,12 @@ type CapacityVO struct {
 	TotalCapacity int64 `json:"totalCapacity"`
 }
 
+// CapacityLocalDTO is the get_space_usage request (CapacityLocalDTO.java:
+// equipmentNo). capacity/query takes no body.
+type CapacityLocalDTO struct {
+	EquipmentNo string `json:"equipmentNo"`
+}
+
 // CapacityLocalVO is the response to POST /api/file/2/users/get_space_usage.
 // Extends BaseVO (com/ratta/file/vo/CapacityLocalVO.java); allocationVO is a
 // nested object (AllocationVO does NOT extend BaseVO).

@@ -268,6 +268,51 @@ func TestQueryByPathMissingAndEscape(t *testing.T) {
 	}
 }
 
+// TestCapacityQuery: usedCapacity is the du-sum, totalCapacity the quota.
+func TestCapacityQuery(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "a.bin"), make([]byte, 123), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	h := newFileHandler(t, root)
+	out := decodeMap(t, h.CapacityQuery, `{}`)
+	if out["success"] != true {
+		t.Fatalf("success = %v", out["success"])
+	}
+	if out["usedCapacity"].(float64) != 123 {
+		t.Errorf("usedCapacity = %v; want 123", out["usedCapacity"])
+	}
+	if int64(out["totalCapacity"].(float64)) != 1<<40 {
+		t.Errorf("totalCapacity = %v; want 1 TiB", out["totalCapacity"])
+	}
+}
+
+// TestGetSpaceUsage: used = du-sum, allocationVO carries the quota + tag.
+func TestGetSpaceUsage(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "a.bin"), make([]byte, 500), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	h := newFileHandler(t, root)
+	out := decodeMap(t, h.GetSpaceUsage, `{"equipmentNo":"SN078"}`)
+	if out["success"] != true || out["equipmentNo"] != "SN078" {
+		t.Fatalf("got %v", out)
+	}
+	if out["used"].(float64) != 500 {
+		t.Errorf("used = %v; want 500", out["used"])
+	}
+	alloc, ok := out["allocationVO"].(map[string]any)
+	if !ok {
+		t.Fatalf("allocationVO missing: %v", out["allocationVO"])
+	}
+	if alloc["tag"] != "individual" {
+		t.Errorf("allocationVO.tag = %v; want individual", alloc["tag"])
+	}
+	if int64(alloc["allocated"].(float64)) != 1<<40 {
+		t.Errorf("allocationVO.allocated = %v; want 1 TiB", alloc["allocated"])
+	}
+}
+
 func itoa(n int64) string { return strconv.FormatInt(n, 10) }
 
 func names(es []map[string]any) []string {
