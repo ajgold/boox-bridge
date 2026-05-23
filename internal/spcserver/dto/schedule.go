@@ -52,6 +52,16 @@ type ScheduleTaskAllVO struct {
 	ScheduleTask  []SPCTask `json:"scheduleTask"`
 }
 
+// UpdateScheduleTaskListDTO is the PUT /schedule/task/list request
+// (UpdateScheduleTaskListDTO.java): a wrapper carrying the batch under
+// updateScheduleTaskList — NOT a bare array. The device sends this when
+// completing/editing tasks. Inner item field names match SPCTask, so decoding
+// them as []SPCTask captures the relevant fields (recurrenceId is ignored).
+type UpdateScheduleTaskListDTO struct {
+	TaskListID             string    `json:"taskListId"`
+	UpdateScheduleTaskList []SPCTask `json:"updateScheduleTaskList"`
+}
+
 // ScheduleTaskGroupDO is one task group/list (ScheduleTaskGroupDO.java).
 type ScheduleTaskGroupDO struct {
 	TaskListID   string `json:"taskListId"`

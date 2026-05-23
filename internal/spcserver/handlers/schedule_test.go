@@ -137,6 +137,36 @@ func TestTaskGetAndDelete(t *testing.T) {
 	}
 }
 
+// TestTaskListUpdateWrapper verifies the bulk update accepts the device's
+// UpdateScheduleTaskListDTO wrapper (tasks under updateScheduleTaskList, not a
+// bare array) and applies a completion. Regression for the "bad task list"
+// E0330 seen on-device 2026-05-23. Verifies: spc-phase-1.AC4.3
+func TestTaskListUpdateWrapper(t *testing.T) {
+	h, store := newScheduleHandler(t)
+	seedTask(t, store, "complete me", 3000)
+	id := taskstore.GenerateTaskID("complete me", 3000)
+
+	// Device-shaped wrapper: complete the task.
+	body := `{"taskListId":"1","updateScheduleTaskList":[` +
+		`{"taskId":"` + id + `","title":"complete me","status":"completed","completedTime":3000,"lastModified":9999}]}`
+	if !decodeSuccess(t, postJSON(t, h.TaskListUpdate, body)) {
+		t.Fatalf("task/list update should succeed on the wrapper shape")
+	}
+
+	got, err := store.Get(context.Background(), id)
+	if err != nil || got == nil {
+		t.Fatalf("task missing after update: %v", err)
+	}
+	if got.Status.String != "COMPLETED" {
+		t.Errorf("expected COMPLETED after completion, got %q", got.Status.String)
+	}
+
+	// A bare array (the old wrong shape) must fail — guards the regression.
+	if decodeSuccess(t, postJSON(t, h.TaskListUpdate, `[{"taskId":"x"}]`)) {
+		t.Errorf("bare-array body should be rejected as bad task list")
+	}
+}
+
 // TestSummaryStub verifies the summary stubs return success. Verifies: AC4.7
 func TestSummaryStub(t *testing.T) {
 	h, _ := newScheduleHandler(t)

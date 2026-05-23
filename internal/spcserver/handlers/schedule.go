@@ -150,15 +150,17 @@ func (h *ScheduleHandler) TaskUpdate(w http.ResponseWriter, r *http.Request) {
 	envelope.WriteJSON(w, envelope.OK())
 }
 
-// TaskListUpdate handles PUT /api/file/schedule/task/list (bulk upsert).
+// TaskListUpdate handles PUT /api/file/schedule/task/list (bulk upsert). The
+// device wraps the batch in UpdateScheduleTaskListDTO (tasks under
+// updateScheduleTaskList), NOT a bare array — completing a task hits this path.
 func (h *ScheduleHandler) TaskListUpdate(w http.ResponseWriter, r *http.Request) {
-	var list []dto.SPCTask
-	if err := json.NewDecoder(r.Body).Decode(&list); err != nil {
+	var req dto.UpdateScheduleTaskListDTO
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		envelope.WriteError(w, "E0330", "bad task list")
 		return
 	}
-	for i := range list {
-		t := mapping.SPCToTask(list[i])
+	for i := range req.UpdateScheduleTaskList {
+		t := mapping.SPCToTask(req.UpdateScheduleTaskList[i])
 		if t.TaskListID.String == "" {
 			t.TaskListID.String, t.TaskListID.Valid = h.Groups.DefaultID(), true
 		}
