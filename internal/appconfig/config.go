@@ -94,6 +94,10 @@ type Config struct {
 	SPCJWTSecret      string // defaults to Constant.SECRET
 	SPCDeviceAccount  string // expected terminal-login account ("" = accept any)
 	SPCDevicePassword string // raw account password; UB computes md5Hex(raw)
+
+	// SPC file listing (Phase 2)
+	SPCFileRoot   string // dedicated storage root the device browses ("" = disabled)
+	SPCQuotaBytes int64  // fake total capacity reported to the device
 }
 
 // SaveResult reports the outcome of a Save operation.
@@ -183,6 +187,8 @@ func loadConfigFromDB(ctx context.Context, db *sql.DB, applyEnv bool) (*Config, 
 		SPCJWTSecret:         dbVals[KeySPCJWTSecret],
 		SPCDeviceAccount:     dbVals[KeySPCDeviceAccount],
 		SPCDevicePassword:    dbVals[KeySPCDevicePassword],
+		SPCFileRoot:          dbVals[KeySPCFileRoot],
+		SPCQuotaBytes:        parseInt64WithDefault(dbVals[KeySPCQuotaBytes], 1<<40),
 	}
 
 	return cfg, nil
@@ -317,6 +323,8 @@ func configToMap(cfg *Config) map[string]string {
 		KeySPCJWTSecret:         cfg.SPCJWTSecret,
 		KeySPCDeviceAccount:     cfg.SPCDeviceAccount,
 		KeySPCDevicePassword:    cfg.SPCDevicePassword,
+		KeySPCFileRoot:          cfg.SPCFileRoot,
+		KeySPCQuotaBytes:        strconv.FormatInt(cfg.SPCQuotaBytes, 10),
 	}
 	return m
 }
@@ -352,6 +360,17 @@ func parseInt64(v string) int64 {
 	n, err := strconv.ParseInt(v, 10, 64)
 	if err != nil {
 		return 0
+	}
+	return n
+}
+
+func parseInt64WithDefault(v string, def int64) int64 {
+	if v == "" {
+		return def
+	}
+	n, err := strconv.ParseInt(v, 10, 64)
+	if err != nil {
+		return def
 	}
 	return n
 }

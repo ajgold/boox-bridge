@@ -659,6 +659,88 @@ func TestSPCJWTSecretEnvOverride(t *testing.T) {
 	}
 }
 
+// TestSPCFileConfigDefaults verifies the Phase 2 file-listing keys default
+// correctly: an empty file root (listing inert by default) and a 1 TiB quota.
+func TestSPCFileConfigDefaults(t *testing.T) {
+	db := openTestDB(t)
+	ctx := context.Background()
+
+	cfg, err := Load(ctx, db)
+	if err != nil {
+		t.Fatalf("Load failed: %v", err)
+	}
+	if cfg.SPCFileRoot != "" {
+		t.Errorf("expected empty SPCFileRoot by default, got %q", cfg.SPCFileRoot)
+	}
+	if cfg.SPCQuotaBytes != 1<<40 {
+		t.Errorf("expected SPCQuotaBytes=1 TiB (%d), got %d", int64(1)<<40, cfg.SPCQuotaBytes)
+	}
+}
+
+// TestSPCFileConfigRoundtrip verifies the Phase 2 keys survive Save→Load.
+func TestSPCFileConfigRoundtrip(t *testing.T) {
+	db := openTestDB(t)
+	ctx := context.Background()
+
+	cfg, err := Load(ctx, db)
+	if err != nil {
+		t.Fatalf("Load failed: %v", err)
+	}
+	cfg.SPCFileRoot = "/mnt/supernote/supernote_data/acct/Supernote"
+	cfg.SPCQuotaBytes = 25485312
+
+	if _, err := Save(ctx, db, cfg); err != nil {
+		t.Fatalf("Save failed: %v", err)
+	}
+	reloaded, err := Load(ctx, db)
+	if err != nil {
+		t.Fatalf("Load failed: %v", err)
+	}
+	if reloaded.SPCFileRoot != "/mnt/supernote/supernote_data/acct/Supernote" {
+		t.Errorf("SPCFileRoot not preserved: got %q", reloaded.SPCFileRoot)
+	}
+	if reloaded.SPCQuotaBytes != 25485312 {
+		t.Errorf("SPCQuotaBytes not preserved: got %d", reloaded.SPCQuotaBytes)
+	}
+}
+
+// TestSPCFileRootEnvOverride verifies UB_SPC_FILE_ROOT overrides the DB value.
+func TestSPCFileRootEnvOverride(t *testing.T) {
+	db := openTestDB(t)
+	ctx := context.Background()
+
+	if err := notedb.SetSetting(ctx, db, KeySPCFileRoot, "/db/path"); err != nil {
+		t.Fatalf("SetSetting failed: %v", err)
+	}
+	t.Setenv("UB_SPC_FILE_ROOT", "/env/path")
+	cfg, err := Load(ctx, db)
+	if err != nil {
+		t.Fatalf("Load failed: %v", err)
+	}
+	if cfg.SPCFileRoot != "/env/path" {
+		t.Errorf("expected SPCFileRoot=/env/path (from env), got %q", cfg.SPCFileRoot)
+	}
+}
+
+// TestSPCQuotaMalformedFallsBackToDefault verifies a non-numeric quota string in
+// the DB falls back to the 1 TiB default rather than 0 (a 0 quota would make the
+// device think it has no storage).
+func TestSPCQuotaMalformedFallsBackToDefault(t *testing.T) {
+	db := openTestDB(t)
+	ctx := context.Background()
+
+	if err := notedb.SetSetting(ctx, db, KeySPCQuotaBytes, "not-a-number"); err != nil {
+		t.Fatalf("SetSetting failed: %v", err)
+	}
+	cfg, err := Load(ctx, db)
+	if err != nil {
+		t.Fatalf("Load failed: %v", err)
+	}
+	if cfg.SPCQuotaBytes != 1<<40 {
+		t.Errorf("expected SPCQuotaBytes to fall back to 1 TiB on malformed value, got %d", cfg.SPCQuotaBytes)
+	}
+}
+
 // TestIsSetupRequiredWithEmptyDB verifies that IsSetupRequired returns true when
 // DB is empty and no env vars are set.
 // Covers: platform-neutral-config.AC3.3
