@@ -84,6 +84,13 @@ const (
 	KeySPCFileRoot   = "spc_file_root"
 	KeySPCQuotaBytes = "spc_quota_bytes"
 
+	// SPC OSS signing (Phase 3 download). KeySPCOssSecret signs/verifies the
+	// presigned download/upload URLs UB issues to itself. Empty default →
+	// auto-generated and persisted on first boot (EnsureSPCOssSecret). The
+	// device treats signed URLs as opaque, so the value need not match real
+	// SPC's hardcoded SECRET_KEY — see docs/spc-protocol.md §6.
+	KeySPCOssSecret = "spc_oss_secret"
+
 	// Runtime-configurable (existing keys, read at job time via closures — NOT loaded into Config struct)
 	// These are included here for completeness but are accessed via notedb.GetSetting directly.
 	KeySNInjectEnabled     = "sn_inject_enabled"
@@ -154,6 +161,7 @@ var envVarForKey = map[string]string{
 	KeySPCDevicePassword:    "UB_SPC_DEVICE_PASSWORD",
 	KeySPCFileRoot:          "UB_SPC_FILE_ROOT",
 	KeySPCQuotaBytes:        "UB_SPC_QUOTA_BYTES",
+	KeySPCOssSecret:         "UB_SPC_OSS_SECRET",
 }
 
 // defaultValues provides the default for each setting key when neither DB nor env var is set.
@@ -234,4 +242,5 @@ var restartRequired = map[string]bool{
 	KeySPCDevicePassword:    true,
 	KeySPCFileRoot:          true,
 	KeySPCQuotaBytes:        true,
+	KeySPCOssSecret:         true,
 }

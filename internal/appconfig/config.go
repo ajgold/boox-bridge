@@ -2,7 +2,9 @@ package appconfig
 
 import (
 	"context"
+	"crypto/rand"
 	"database/sql"
+	"encoding/hex"
 	"os"
 	"strconv"
 	"strings"
@@ -98,6 +100,9 @@ type Config struct {
 	// SPC file listing (Phase 2)
 	SPCFileRoot   string // dedicated storage root the device browses ("" = disabled)
 	SPCQuotaBytes int64  // fake total capacity reported to the device
+
+	// SPC OSS signing (Phase 3 download)
+	SPCOssSecret string // signs/verifies presigned URLs ("" = generate on first boot)
 }
 
 // SaveResult reports the outcome of a Save operation.
@@ -189,6 +194,7 @@ func loadConfigFromDB(ctx context.Context, db *sql.DB, applyEnv bool) (*Config, 
 		SPCDevicePassword:    dbVals[KeySPCDevicePassword],
 		SPCFileRoot:          dbVals[KeySPCFileRoot],
 		SPCQuotaBytes:        parseInt64WithDefault(dbVals[KeySPCQuotaBytes], 1<<40),
+		SPCOssSecret:         dbVals[KeySPCOssSecret],
 	}
 
 	return cfg, nil
@@ -325,6 +331,7 @@ func configToMap(cfg *Config) map[string]string {
 		KeySPCDevicePassword:    cfg.SPCDevicePassword,
 		KeySPCFileRoot:          cfg.SPCFileRoot,
 		KeySPCQuotaBytes:        strconv.FormatInt(cfg.SPCQuotaBytes, 10),
+		KeySPCOssSecret:         cfg.SPCOssSecret,
 	}
 	return m
 }
@@ -373,4 +380,29 @@ func parseInt64WithDefault(v string, def int64) int64 {
 		return def
 	}
 	return n
+}
+
+// EnsureSPCOssSecret returns the persisted SPC OSS signing secret, generating
+// and storing a fresh 32-byte (64 hex char) random value on first boot if none
+// is set. Used by the UB-as-SPC server mode (Phase 3 download) to sign the
+// presigned URLs it issues to itself; the device never computes a signature, so
+// any stable per-install secret works. An already-set value (env- or
+// DB-configured) is returned untouched.
+func EnsureSPCOssSecret(ctx context.Context, db *sql.DB) (string, error) {
+	existing, err := notedb.GetSetting(ctx, db, KeySPCOssSecret)
+	if err != nil {
+		return "", err
+	}
+	if existing != "" {
+		return existing, nil
+	}
+	b := make([]byte, 32)
+	if _, err := rand.Read(b); err != nil {
+		return "", err
+	}
+	secret := hex.EncodeToString(b)
+	if err := notedb.SetSetting(ctx, db, KeySPCOssSecret, secret); err != nil {
+		return "", err
+	}
+	return secret, nil
 }

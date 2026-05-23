@@ -888,3 +888,98 @@ func TestIsSetupRequiredWithPartialDBCredentials(t *testing.T) {
 		})
 	}
 }
+
+// TestSPCOssSecretDefaultEmpty verifies the OSS secret defaults to empty
+// (so EnsureSPCOssSecret generates one on first boot).
+// Covers: spc-phase-3.AC4.1
+func TestSPCOssSecretDefaultEmpty(t *testing.T) {
+	db := openTestDB(t)
+	defer db.Close()
+	ctx := context.Background()
+
+	cfg, err := Load(ctx, db)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.SPCOssSecret != "" {
+		t.Errorf("expected empty SPCOssSecret by default, got %q", cfg.SPCOssSecret)
+	}
+}
+
+// TestSPCOssSecretRoundtrip verifies a DB-set OSS secret loads back verbatim.
+// Covers: spc-phase-3.AC4.1
+func TestSPCOssSecretRoundtrip(t *testing.T) {
+	db := openTestDB(t)
+	defer db.Close()
+	ctx := context.Background()
+
+	if err := notedb.SetSetting(ctx, db, KeySPCOssSecret, "deadbeefcafe"); err != nil {
+		t.Fatalf("SetSetting: %v", err)
+	}
+	cfg, err := Load(ctx, db)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.SPCOssSecret != "deadbeefcafe" {
+		t.Errorf("SPCOssSecret = %q, want %q", cfg.SPCOssSecret, "deadbeefcafe")
+	}
+}
+
+// TestEnsureSPCOssSecretGeneratesAndPersists verifies first-boot generation:
+// a fresh DB yields a 64-char hex secret that is persisted and stable across
+// a second call (i.e. survives "restart").
+// Covers: spc-phase-3.AC4.1
+func TestEnsureSPCOssSecretGeneratesAndPersists(t *testing.T) {
+	db := openTestDB(t)
+	defer db.Close()
+	ctx := context.Background()
+
+	first, err := EnsureSPCOssSecret(ctx, db)
+	if err != nil {
+		t.Fatalf("EnsureSPCOssSecret (first): %v", err)
+	}
+	if len(first) != 64 {
+		t.Errorf("generated secret length = %d, want 64 hex chars", len(first))
+	}
+	for _, c := range first {
+		if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f')) {
+			t.Fatalf("generated secret has non-hex char %q in %q", c, first)
+		}
+	}
+	// Persisted to settings.
+	stored, err := notedb.GetSetting(ctx, db, KeySPCOssSecret)
+	if err != nil {
+		t.Fatalf("GetSetting: %v", err)
+	}
+	if stored != first {
+		t.Errorf("persisted secret %q != returned %q", stored, first)
+	}
+	// Stable across a second call (no regeneration).
+	second, err := EnsureSPCOssSecret(ctx, db)
+	if err != nil {
+		t.Fatalf("EnsureSPCOssSecret (second): %v", err)
+	}
+	if second != first {
+		t.Errorf("secret changed across calls: %q -> %q", first, second)
+	}
+}
+
+// TestEnsureSPCOssSecretHonorsExisting verifies a pre-seeded secret is returned
+// untouched (env/DB-configured values are not overwritten).
+// Covers: spc-phase-3.AC4.1
+func TestEnsureSPCOssSecretHonorsExisting(t *testing.T) {
+	db := openTestDB(t)
+	defer db.Close()
+	ctx := context.Background()
+
+	if err := notedb.SetSetting(ctx, db, KeySPCOssSecret, "preseeded-secret"); err != nil {
+		t.Fatalf("SetSetting: %v", err)
+	}
+	got, err := EnsureSPCOssSecret(ctx, db)
+	if err != nil {
+		t.Fatalf("EnsureSPCOssSecret: %v", err)
+	}
+	if got != "preseeded-secret" {
+		t.Errorf("EnsureSPCOssSecret overwrote existing: got %q", got)
+	}
+}
