@@ -89,8 +89,13 @@ valid = computed.trim().equals(webPassword.trim())
 - Protocol version: **Engine.IO v3** (confirmed live: handshake query `EIO=3&transport=websocket`).
 - Server library: `corundumstudio/netty-socketio` 2.0.3.
 - Ping cadence: `socket.pinginterval = 5000` ms, `socket.pingtimeout = 25000` ms.
-- **`permessage-deflate` is negotiated** (stateful, context-takeover). UB's Engine.IO server must support it. (Frames captured in 0b decompress as raw deflate with `00 00 ff ff` appended; the stream is stateful so frames don't decode in isolation.)
-- **Heartbeat observed (0b/0c): every 5 s the device sends BOTH** the Engine.IO native ping packet `2` (server replies `3`) **and** a Socket.IO event frame `42["ratta_ping"]`. Confirmed over ~80 s of idle.
+- **`permessage-deflate`: NOT required (corrected 2026-05-23).** UB serves the socket uncompressed (no extension negotiated) and the device holds a stable connection fine. The 0b "negotiated/required" inference was wrong.
+- **Heartbeat is CLIENT-driven (corrected 2026-05-23).** The device (standard `io.socket` engine.io-client, EIO3) sends the native ping `2` ~every `pingInterval`; the server replies pong `3`. The server does **not** send pings. The device does **NOT** send `ratta_ping` (the 0b note claiming both was wrong — `ratta:0` over many minutes on hardware).
+
+> **§3 corrections — Phase 1 hardware validation (2026-05-23).** These supersede the 0b/0c inferences below where they conflict. Found by decompiling the device apps (the answers are client-side, not in captures). See memory `project_spc_socketio_breakthrough`.
+> - **Server sends Socket.IO CONNECT (`40`) proactively.** The device connects to the default namespace `/`; its `io.socket.client.Socket.onopen()` returns early for `/` WITHOUT sending a CONNECT — it waits to RECEIVE `40` to fire `EVENT_CONNECT`. So the server emits the EIO open `0{...}` **then `40`**. Omit it and the client never reaches CONNECTED and reconnect-loops (30/60/120/240s backoff) while the server side looks healthy.
+> - **Task push uses the `to-do` event, not `ServerMessage`.** The device's `TaskService` binds `to-do`; its `onReceive` unconditionally triggers a task sync (then pulls via REST `task/all`). `ServerMessage` = file channel, `digest` = digests. The **event name** routes the push; the inner `msgType` is not what the task listener checks.
+> - The `sign` query param is accepted-and-ignored by UB (token verification is the gate); the device does not require UB to validate it.
 
 ### Socket handshake + auth (observed 0b)
 
