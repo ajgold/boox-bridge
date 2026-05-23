@@ -313,6 +313,32 @@ func TestGetSpaceUsage(t *testing.T) {
 	}
 }
 
+// TestCreateFolderStubNoWrite: create_folder_v2 returns success WITHOUT creating
+// the directory (Phase 2 is read-only; honors the no-device-writes exit state).
+func TestCreateFolderStubNoWrite(t *testing.T) {
+	root := t.TempDir()
+	h := newFileHandler(t, root)
+	out := decodeMap(t, h.CreateFolderV2, `{"equipmentNo":"SN078","path":"/Note/NewFolder","autorename":false}`)
+	if out["success"] != true || out["equipmentNo"] != "SN078" {
+		t.Errorf("got %v; want success:true equipmentNo:SN078", out)
+	}
+	if _, err := os.Stat(filepath.Join(root, "Note", "NewFolder")); !os.IsNotExist(err) {
+		t.Errorf("create_folder_v2 must not create a directory in Phase 2 (stat err=%v)", err)
+	}
+}
+
+// TestQueryDeleteApiStub: query/deleteApi returns success with a null entry.
+func TestQueryDeleteApiStub(t *testing.T) {
+	h := newFileHandler(t, t.TempDir())
+	out := decodeMap(t, h.QueryByIDDeleteAPI, `{"equipmentNo":"SN078","id":"5"}`)
+	if out["success"] != true {
+		t.Errorf("success = %v; want true", out["success"])
+	}
+	if out["entriesVO"] != nil {
+		t.Errorf("entriesVO = %v; want null", out["entriesVO"])
+	}
+}
+
 func itoa(n int64) string { return strconv.FormatInt(n, 10) }
 
 func names(es []map[string]any) []string {

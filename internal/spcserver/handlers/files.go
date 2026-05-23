@@ -222,6 +222,30 @@ func (h *FileHandler) GetSpaceUsage(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// CreateFolderV2 is a canned-success stub. Phase 2 is read-only, so it does NOT
+// create anything on disk (honors the no-device-writes exit state). The device
+// was not observed calling it in the 0b capture; it becomes real in Phase 4.
+func (h *FileHandler) CreateFolderV2(w http.ResponseWriter, r *http.Request) {
+	var req dto.CreateFolderLocalDTO
+	_ = json.NewDecoder(r.Body).Decode(&req)
+	envelope.WriteJSON(w, dto.CreateFolderLocalVO{
+		BaseVO:      envelope.OK(),
+		EquipmentNo: req.EquipmentNo,
+		// metadata omitted — nothing was created
+	})
+}
+
+// QueryByIDDeleteAPI is a canned-success stub for query/deleteApi (not observed
+// in 0b; becomes real in Phase 4/5). Returns success with a null entry.
+func (h *FileHandler) QueryByIDDeleteAPI(w http.ResponseWriter, r *http.Request) {
+	var req dto.FileQueryV2DTO
+	_ = json.NewDecoder(r.Body).Decode(&req)
+	envelope.WriteJSON(w, dto.FileQueryV2VO{
+		BaseVO:      envelope.OK(),
+		EquipmentNo: req.EquipmentNo,
+	})
+}
+
 // hasTopLevelFolders reports whether the file root contains at least one
 // subdirectory (the synType signal). An unset or unreadable root → false.
 func (h *FileHandler) hasTopLevelFolders() bool {
