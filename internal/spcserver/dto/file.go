@@ -208,3 +208,64 @@ type FileDownloadApplyVO struct {
 	Nonce     string `json:"nonce"`
 	PathID    string `json:"pathId"`
 }
+
+// FileUploadApplyLocalDTO is the upload/apply request
+// (com/ratta/file/dto/FileUploadApplyLocalDTO.java) — all String fields; size is
+// the claimed byte count as a decimal string.
+type FileUploadApplyLocalDTO struct {
+	EquipmentNo string `json:"equipmentNo"`
+	Path        string `json:"path"`
+	FileName    string `json:"fileName"`
+	Size        string `json:"size"`
+}
+
+// FileUploadApplyLocalVO is the upload/apply response
+// (com/ratta/file/vo/FileUploadApplyLocalVO.java extends BaseVO). UB fills
+// innerName (a server-chosen UUID) and fullUploadUrl (the presigned
+// /api/oss/upload URL the device then POSTs the bytes to). bucketName/xAmzDate/
+// authorization are for real SPC's AWS-style OSS path and stay empty here;
+// partUploadUrl is empty (UB does not implement chunked upload). The device uses
+// only fullUploadUrl and treats it opaquely (same model as download).
+type FileUploadApplyLocalVO struct {
+	envelope.BaseVO
+	EquipmentNo   string `json:"equipmentNo"`
+	BucketName    string `json:"bucketName"`
+	InnerName     string `json:"innerName"`
+	XAmzDate      string `json:"xAmzDate"`
+	Authorization string `json:"authorization"`
+	FullUploadUrl string `json:"fullUploadUrl"`
+	PartUploadUrl string `json:"partUploadUrl"`
+}
+
+// UploadFileVO is the /api/oss/upload response (com/ratta/file/vo/UploadFileVO —
+// a bare BaseVO; the device only checks success).
+type UploadFileVO struct {
+	envelope.BaseVO
+}
+
+// FileUploadFinishLocalDTO is the upload/finish request
+// (com/ratta/file/dto/FileUploadFinishLocalDTO.java). content_hash is the file
+// MD5 and is the ONLY snake_case request field observed (§8); innerName ties
+// back to the apply that minted it. size is a decimal string.
+type FileUploadFinishLocalDTO struct {
+	EquipmentNo string `json:"equipmentNo"`
+	Path        string `json:"path"`
+	Size        string `json:"size"`
+	FileName    string `json:"fileName"`
+	ContentHash string `json:"content_hash"`
+	InnerName   string `json:"innerName"`
+}
+
+// FileUploadFinishLocalVO is the upload/finish response
+// (com/ratta/file/vo/FileUploadFinishLocalVO.java extends BaseVO). id is a String
+// on the wire here (the SPC id-type split, §8); size is a Long (file bytes).
+// Snake_case path_display/content_hash match EntriesVO (no @JsonProperty).
+type FileUploadFinishLocalVO struct {
+	envelope.BaseVO
+	EquipmentNo string `json:"equipmentNo"`
+	PathDisplay string `json:"path_display"`
+	ID          string `json:"id"`
+	Size        int64  `json:"size"`
+	Name        string `json:"name"`
+	ContentHash string `json:"content_hash"`
+}
