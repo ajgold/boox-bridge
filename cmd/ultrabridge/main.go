@@ -455,6 +455,17 @@ func main() {
 		} else {
 			ossSecret = s
 		}
+		// Phase 4d (additive): kick the OCR pipeline for uploaded .note/.pdf files
+		// by handing the Supernote source's processor to the upload handler. The
+		// file rides the unmodified pipeline (catalog write-through included);
+		// OCRWatchDir scopes the kick to the Supernote NotesPath.
+		var spcEnqueuer spcserver.UploadEnqueuerFunc
+		for _, s := range sources {
+			if snSrc, ok := s.(*supernote.Source); ok {
+				proc := snSrc.Processor()
+				spcEnqueuer = func(ctx context.Context, path string) error { return proc.Enqueue(ctx, path) }
+			}
+		}
 		spcSrv = spcserver.New(spcserver.Config{
 			Mode:           cfg.SPCMode,
 			ListenAddr:     cfg.SPCListenAddr,
@@ -469,6 +480,8 @@ func main() {
 			FileRoot:       cfg.SPCFileRoot,
 			QuotaBytes:     cfg.SPCQuotaBytes,
 			OssSecret:      ossSecret,
+			UploadEnqueuer: spcEnqueuer,
+			OCRWatchDir:    snNotesPath,
 			Logger:         logger,
 		})
 		taskNotifier = notify.NewSocketNotifier(

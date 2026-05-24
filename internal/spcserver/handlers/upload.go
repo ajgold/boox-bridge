@@ -5,7 +5,9 @@ import (
 	"encoding/json"
 	"log/slog"
 	"net/http"
+	"path/filepath"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/sysop/ultrabridge/internal/spcserver/dto"
@@ -48,6 +50,15 @@ type UploadNotifier interface {
 	NotifyFile(ctx context.Context) error
 }
 
+// Enqueuer submits a freshly-uploaded file to the OCR/index pipeline. It is the
+// minimal slice of processor.Store the upload path needs; main.go adapts the
+// real processor to it. Optional on UploadHandler (nil = no OCR kick) so tests
+// and FileRoot-only deployments stay light. The file flows through the
+// unmodified pipeline (catalog write-through included) — no worker changes.
+type Enqueuer interface {
+	Enqueue(ctx context.Context, path string) error
+}
+
 // UploadHandler serves the SPC upload write-path (Phase 4): upload/apply mints a
 // presigned /api/oss/upload URL + an innerName; the device POSTs the bytes to
 // UploadStream, which stages them under FILE_ROOT/.staging; upload/finish then
@@ -59,7 +70,13 @@ type UploadHandler struct {
 	Signer   *oss.Signer
 	Staging  *staging.Store
 	Notifier UploadNotifier
-	Logger   *slog.Logger
+	// Enqueuer (optional) kicks the OCR pipeline for uploaded .note/.pdf files;
+	// OCRWatchDir, when set, restricts the kick to uploads under that directory
+	// (the Supernote source's NotesPath) so files outside the pipeline's reach
+	// aren't enqueued. Empty OCRWatchDir enqueues any .note/.pdf.
+	Enqueuer    Enqueuer
+	OCRWatchDir string
+	Logger      *slog.Logger
 }
 
 func (h *UploadHandler) log() *slog.Logger {
@@ -169,6 +186,9 @@ func (h *UploadHandler) Finish(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Kick the OCR pipeline for the uploaded notebook (best-effort; additive).
+	h.maybeEnqueueOCR(r.Context(), abs)
+
 	// Nudge the device to re-pull files (best-effort; not load-bearing).
 	if h.Notifier != nil {
 		_ = h.Notifier.NotifyFile(r.Context())
@@ -203,6 +223,37 @@ func (h *UploadHandler) nowMillis() int64 {
 		return h.Signer.Now().UnixMilli()
 	}
 	return time.Now().UnixMilli()
+}
+
+// maybeEnqueueOCR best-effort submits an uploaded .note/.pdf to the OCR pipeline.
+// A non-.note/.pdf, a path outside OCRWatchDir (when set), a nil Enqueuer, or an
+// enqueue error are all silently skipped — OCR is additive and never fails the
+// upload (the device round-trip already succeeded).
+func (h *UploadHandler) maybeEnqueueOCR(ctx context.Context, abs string) {
+	if h.Enqueuer == nil {
+		return
+	}
+	switch strings.ToLower(filepath.Ext(abs)) {
+	case ".note", ".pdf":
+	default:
+		return
+	}
+	if h.OCRWatchDir != "" && !underDir(h.OCRWatchDir, abs) {
+		return
+	}
+	if err := h.Enqueuer.Enqueue(ctx, abs); err != nil {
+		h.log().Warn("upload OCR enqueue failed", "path", abs, "err", err)
+	}
+}
+
+// underDir reports whether abs lies within dir (after cleaning), guarding against
+// a "../" relative escape.
+func underDir(dir, abs string) bool {
+	rel, err := filepath.Rel(filepath.Clean(dir), filepath.Clean(abs))
+	if err != nil {
+		return false
+	}
+	return rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
 }
 
 // uploadError writes the SPC FileUploadException response: HTTP 500 with the bare

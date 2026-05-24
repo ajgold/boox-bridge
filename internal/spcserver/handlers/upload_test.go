@@ -144,6 +144,74 @@ func TestUploadRoundTrip(t *testing.T) {
 	}
 }
 
+// fakeEnqueuer records the paths handed to the OCR pipeline.
+type fakeEnqueuer struct{ paths []string }
+
+func (f *fakeEnqueuer) Enqueue(_ context.Context, path string) error {
+	f.paths = append(f.paths, path)
+	return nil
+}
+
+// roundTrip drives apply→upload→finish for fileName under /Note and returns the
+// finish response.
+func roundTrip(t *testing.T, h *UploadHandler, fileName string, body []byte) map[string]any {
+	t.Helper()
+	apply := decodeMap(t, h.Apply,
+		`{"equipmentNo":"SN078","path":"/Note","fileName":"`+fileName+`","size":"`+strconv.Itoa(len(body))+`"}`)
+	inner := apply["innerName"].(string)
+	full := apply["fullUploadUrl"].(string)
+	rec := httptest.NewRecorder()
+	h.UploadStream(rec, uploadStreamReq(t, full, body))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("oss/upload status = %d for %s", rec.Code, fileName)
+	}
+	finishBody, _ := json.Marshal(map[string]any{
+		"equipmentNo": "SN078", "path": "/Note", "fileName": fileName,
+		"size": strconv.Itoa(len(body)), "content_hash": md5Hex(t, body), "innerName": inner,
+	})
+	return decodeMap(t, h.Finish, string(finishBody))
+}
+
+// AC5.1: a finished .note upload under the watched tree is enqueued for OCR; a
+// .txt (or other non-note) upload is not.
+func TestUploadKicksOCRForNotes(t *testing.T) {
+	root := t.TempDir()
+	h := newUploadHandler(t, root)
+	fe := &fakeEnqueuer{}
+	h.Enqueuer = fe
+	h.OCRWatchDir = root // /Note is under root
+
+	if out := roundTrip(t, h, "kick.note", []byte("note bytes")); out["success"] != true {
+		t.Fatalf("note finish failed: %v", out)
+	}
+	if out := roundTrip(t, h, "skip.txt", []byte("text bytes")); out["success"] != true {
+		t.Fatalf("txt finish failed: %v", out)
+	}
+
+	if len(fe.paths) != 1 {
+		t.Fatalf("enqueued %d paths, want 1 (%v)", len(fe.paths), fe.paths)
+	}
+	if filepath.Base(fe.paths[0]) != "kick.note" {
+		t.Fatalf("enqueued %q, want the .note", fe.paths[0])
+	}
+}
+
+// AC5.1: a .note uploaded outside OCRWatchDir is not enqueued.
+func TestUploadSkipsOCROutsideWatchDir(t *testing.T) {
+	root := t.TempDir()
+	h := newUploadHandler(t, root)
+	fe := &fakeEnqueuer{}
+	h.Enqueuer = fe
+	h.OCRWatchDir = filepath.Join(root, "Document") // /Note is NOT under here
+
+	if out := roundTrip(t, h, "outside.note", []byte("x")); out["success"] != true {
+		t.Fatalf("finish failed: %v", out)
+	}
+	if len(fe.paths) != 0 {
+		t.Fatalf("should not enqueue outside watch dir, got %v", fe.paths)
+	}
+}
+
 // AC3.2: a tampered signature is refused with HTTP 500 + plain text and stages nothing.
 func TestUploadStreamRejectsBadSignature(t *testing.T) {
 	root := t.TempDir()

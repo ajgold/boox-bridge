@@ -54,7 +54,27 @@ type Config struct {
 	// (Phase 3). Auto-generated and persisted on first boot (see
 	// appconfig.EnsureSPCOssSecret); the device treats these URLs as opaque.
 	OssSecret string
-	Logger    *slog.Logger
+	// UploadEnqueuer (optional, Phase 4d) kicks the OCR pipeline for uploaded
+	// .note/.pdf files; OCRWatchDir restricts the kick to that directory (the
+	// Supernote source's NotesPath). Both nil/empty ⇒ no OCR kick.
+	UploadEnqueuer handlers.Enqueuer
+	OCRWatchDir    string
+	Logger         *slog.Logger
+}
+
+// UploadEnqueuerFunc adapts a plain func to handlers.Enqueuer (the processor's
+// own Enqueue is variadic, so it can't satisfy the interface directly). The
+// method is nil-safe: a nil func value assigned to the interface field is a
+// no-op rather than a panic (the typed-nil-interface gotcha when no Supernote
+// source is configured).
+type UploadEnqueuerFunc func(ctx context.Context, path string) error
+
+// Enqueue implements handlers.Enqueuer.
+func (f UploadEnqueuerFunc) Enqueue(ctx context.Context, path string) error {
+	if f == nil {
+		return nil
+	}
+	return f(ctx, path)
 }
 
 // Server is the SPC HTTP + Engine.IO server, both served on one listener. It is
@@ -190,12 +210,14 @@ func (s *Server) registerRoutes() {
 		s.cfg.Logger,
 	)
 	up := &handlers.UploadHandler{
-		Root:     s.cfg.FileRoot,
-		Reg:      reg,
-		Signer:   &oss.Signer{Secret: s.cfg.OssSecret},
-		Staging:  s.staging,
-		Notifier: fileNotifier,
-		Logger:   s.cfg.Logger,
+		Root:        s.cfg.FileRoot,
+		Reg:         reg,
+		Signer:      &oss.Signer{Secret: s.cfg.OssSecret},
+		Staging:     s.staging,
+		Notifier:    fileNotifier,
+		Enqueuer:    s.cfg.UploadEnqueuer,
+		OCRWatchDir: s.cfg.OCRWatchDir,
+		Logger:      s.cfg.Logger,
 	}
 	s.mux.Handle("POST /api/file/3/files/upload/apply", protect(up.Apply))
 	s.mux.Handle("POST /api/file/2/files/upload/finish", protect(up.Finish))
