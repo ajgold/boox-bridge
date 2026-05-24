@@ -18,11 +18,25 @@ user between tasks. No subagent chains (see memory `feedback_inline_oversight_ov
 - `internal/processor/catalog.go` still exists and writes through to MariaDB.
 - `UB_SPC_MODE=client` (default) binds no listener and must stay regression-safe.
 
+## Coexistence principle (overrides the design plan's eager cutover, 2026-05-23)
+**Do not tear down the legacy SPC integration until the entire UB-as-SPC stack is
+built AND integration-tested AND has passed a real-device soak.** Real-SPC
+coexistence stays a live escape hatch (flip NPM back) the whole time. So Phase 4
+is **purely additive** — it deletes nothing. The original design plan's "catalog
+cutover" (delete `processor/catalog.go`, rip out the MariaDB write-through) is
+**removed from Phase 4** and becomes part of a separate, final deprecation phase
+gated on full validation. Untouched through Phase 4: `internal/processor/catalog.go`
++ its write-through, `internal/tasksync/supernote/` (`UB_SN_SYNC_ENABLED`),
+`internal/db/` (MariaDB pool), `internal/sync/`. (User decision, this session.)
+
 ## Design decisions locked before this plan (2026-05-23)
 1. **Upload→OCR wiring is deferred to 4d.** 4a/4b get the device round-tripping
    first (file lands in `FILE_ROOT`, md5-verified, FILE-SYN fires); the explicit
-   `processor.Enqueue` kick and the MariaDB catalog cutover are wired together in
-   4d. (User decision, this session.)
+   `processor.Enqueue` kick lands in 4d. 4d is now OCR-kick only (the catalog
+   cutover that used to ride with it is removed — see Coexistence principle).
+   UB-originated uploads flow through the **unmodified** pipeline, catalog
+   write-through included (best-effort; keeps the real-SPC catalog consistent for
+   flip-back). No new branching in the worker. (User decision, this session.)
 2. **UB controls both ends of the presigned upload URL.** `upload/apply` mints
    `fullUploadUrl` = `/api/oss/upload?...&path=base64url(<innerName>)`; the device
    POSTs to it opaquely (never computes a signature). So the `path` query param
@@ -130,18 +144,18 @@ From `/home/sysop/spc-rev/cfr-decrypted/` (`O_OssLocalController`,
 - **spc-phase-4.AC4.4 Auth + push:** all three are JWT-protected and fire FILE-SYN on
   success; traversal-guarded on every path argument.
 
-### spc-phase-4.AC5: Pipeline integration + catalog cutover (4d)
+### spc-phase-4.AC5: Pipeline integration (4d) — OCR kick only (additive)
 - **spc-phase-4.AC5.1 OCR kick:** when a finished upload's target is a `.note`/`.pdf`
   that falls under the OCR-watched tree, `processor.Enqueue(path)` is called
-  best-effort (failure logged, not propagated); the text becomes searchable.
-- **spc-phase-4.AC5.2 Catalog cutover:** `internal/processor/catalog.go` +
-  `catalog_test.go` deleted; `WorkerConfig.CatalogUpdater` + the `AfterInject()` call
-  removed; the worker updates `notedb.notes.md5`/`size` directly post-injection;
-  `grep -r "catalog.go\|CatalogUpdater\|AfterInject" internal/processor/` is empty;
-  no MariaDB calls observed during OCR. `cmd/ultrabridge/main.go` stops passing the
-  MariaDB pool into the processor (the pool stays — `tasksync/supernote` still uses it).
-- **spc-phase-4.AC5.3 Regression:** `UB_SPC_MODE=client` binds no listener and changes
-  nothing; existing OCR pipeline behavior is otherwise identical (Supernote + Boox).
+  best-effort (failure logged, not propagated); the text becomes searchable. The
+  file flows through the **unmodified** pipeline — including its existing MariaDB
+  catalog write-through (kept per the Coexistence principle; no worker changes).
+- **spc-phase-4.AC5.2 Regression:** `UB_SPC_MODE=client` binds no listener and changes
+  nothing; existing OCR pipeline behavior is identical (Supernote + Boox); the legacy
+  catalog write-through and `tasksync/supernote` client path are untouched.
+
+*(The former AC5.2 "catalog cutover" is removed — deferred to the final deprecation
+phase per the Coexistence principle.)*
 
 ### spc-phase-4.AC6: Device acceptance (tier 2)
 - **spc-phase-4.AC6.1 Upload:** the device uploads a new/modified `.note`; it lands in
@@ -229,24 +243,20 @@ matches on-disk; the file then shows in `list_folder`. Default config → `:8089
 
 ---
 
-## Sub-phase 4d — Pipeline integration + catalog cutover
+## Sub-phase 4d — Pipeline integration (OCR kick only; additive)
 
 ### Task 8: Kick the OCR processor on finished uploads
-**Verifies:** spc-phase-4.AC5.1
+**Verifies:** spc-phase-4.AC5.1, AC5.2
 - In `Finish` (or a hook off it), if the promoted target is `.note`/`.pdf` under the
   OCR-watched tree, `processor.Enqueue(path)` best-effort. Thread the processor Store
-  into `UploadHandler` (interface seam; nil = no-op so tests stay light).
+  into `UploadHandler` (interface seam; nil = no-op so tests stay light). The pipeline
+  itself is unchanged — the file is OCR'd/indexed exactly as a watched-folder file
+  would be, catalog write-through included.
 **Testing:** a fake enqueuer records the path for a `.note`; a `.txt`/non-watched path
 is not enqueued; enqueue error is swallowed.
 
-### Task 9: Catalog cutover (remove MariaDB write-through)
-**Verifies:** spc-phase-4.AC5.2, AC5.3
-- Delete `internal/processor/catalog.go` + `catalog_test.go`; remove
-  `WorkerConfig.CatalogUpdater` + the `AfterInject()` call; worker updates
-  `notedb.notes.md5`/`size` directly. main.go stops passing MariaDB into the processor
-  (pool stays for tasksync). `grep` clean; OCR behavior identical, no MariaDB during OCR.
-**Testing:** existing processor tests still pass (minus the deleted catalog test);
-vet/build clean; the grep guard is empty.
+*(There is no Task 9. The catalog cutover that the original design plan put here is
+removed — see the Coexistence principle; it moves to the final deprecation phase.)*
 
 ---
 
@@ -265,22 +275,26 @@ vet/build clean; the grep guard is empty.
 
 ## Exit state
 - Build/test green; device fully creates, downloads, deletes, moves, copies files
-  against UB; OCR runs against UB-owned uploads with no MariaDB write-through.
-- `internal/processor` no longer touches MariaDB; `internal/tasksync/supernote/`
-  still uses it (Phase 5 deletes it).
+  against UB; OCR runs against UB-owned uploads via the existing pipeline.
+- Phase 4 is **purely additive**: the legacy SPC integration is fully intact —
+  `internal/processor/catalog.go` + its MariaDB write-through, `internal/tasksync/
+  supernote/`, `internal/db/`, `internal/sync/` all unchanged. Real-SPC flip-back
+  remains a working escape hatch.
 
 ## Files this phase touches
-**Created:** `internal/spcserver/staging/{staging.go,staging_test.go}`,
+**Created:** `internal/spcserver/staging/{staging.go,store.go,*_test.go}`,
 `internal/spcserver/handlers/{upload.go,upload_test.go,mutation.go,mutation_test.go}`,
 this plan.
 **Modified:** `internal/spcserver/dto/file.go`, `internal/spcserver/server.go`,
 `internal/spcserver/server_test.go`, `cmd/ultrabridge/main.go`,
-`internal/spcserver/notify/notifier.go` (FILE-SYN variant if needed),
+`internal/spcserver/notify/notifier.go` (NotifyFile/FILE-SYN variant),
 `internal/spcserver/CLAUDE.md`, `docs/spc-protocol.md`.
-**Deleted:** `internal/processor/catalog.go`, `internal/processor/catalog_test.go`.
-**Not touched:** `internal/sync/`, `internal/tasksync/`, `internal/db/` (Phase 5).
+**Deleted:** *(nothing — Phase 4 deletes no legacy code, per the Coexistence principle).*
+**Not touched:** `internal/processor/` (catalog write-through stays), `internal/sync/`,
+`internal/tasksync/`, `internal/db/`.
 
 ## Compact/clear checkpoint
-Merge Phase 4. **DNS-flip moment** (out of scope here — operational). Real SPC stays
-alive one verification week as escape hatch. `/clear` before Phase 5 (recycle CRUD,
-file search, SPC-client code removal).
+Merge Phase 4. Real SPC stays alive as the escape hatch — **no DNS flip / no cutover
+in this phase**. `/clear` before Phase 5 (recycle CRUD, file search). Deprecation of
+the legacy SPC path is its own final phase, gated on full build + integration test +
+device soak.
