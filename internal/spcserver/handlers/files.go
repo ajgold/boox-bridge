@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strconv"
+	"strings"
 
 	"github.com/sysop/ultrabridge/internal/spcserver/capacity"
 	"github.com/sysop/ultrabridge/internal/spcserver/dto"
@@ -124,13 +125,23 @@ func (h *FileHandler) resolveDir(ctx context.Context, id *int64) (string, bool) 
 func (h *FileHandler) childPaths(dir string, recursive bool) ([]string, error) {
 	if recursive {
 		var paths []string
-		err := filepath.WalkDir(dir, func(p string, _ fs.DirEntry, err error) error {
+		err := filepath.WalkDir(dir, func(p string, d fs.DirEntry, err error) error {
 			if err != nil {
 				return nil
 			}
-			if p != dir {
-				paths = append(paths, p)
+			if p == dir {
+				return nil
 			}
+			// Hide UB's own dot-dirs (.staging, .recycle) and any dotfile — they
+			// are never part of the device's native tree. Skipping a dot *dir*
+			// prunes its whole subtree.
+			if isHidden(d.Name()) {
+				if d.IsDir() {
+					return filepath.SkipDir
+				}
+				return nil
+			}
+			paths = append(paths, p)
 			return nil
 		})
 		return paths, err
@@ -141,9 +152,19 @@ func (h *FileHandler) childPaths(dir string, recursive bool) ([]string, error) {
 	}
 	paths := make([]string, 0, len(ents))
 	for _, e := range ents {
+		if isHidden(e.Name()) {
+			continue
+		}
 		paths = append(paths, filepath.Join(dir, e.Name()))
 	}
 	return paths, nil
+}
+
+// isHidden reports whether a directory entry is dot-prefixed. UB stages uploads
+// under .staging and soft-deletes into .recycle; both live under FILE_ROOT but
+// must stay invisible to the device's file listing.
+func isHidden(name string) bool {
+	return strings.HasPrefix(name, ".")
 }
 
 // sortEntries orders folders before files, then by path_display.

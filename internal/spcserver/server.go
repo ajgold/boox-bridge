@@ -201,6 +201,16 @@ func (s *Server) registerRoutes() {
 	s.mux.Handle("POST /api/file/2/files/upload/finish", protect(up.Finish))
 	s.mux.HandleFunc("POST /api/oss/upload", up.UploadStream)
 
+	// File mutations (Phase 4c) — delete (soft, to .recycle/), move, copy. All
+	// JWT-protected business calls operating on the shared registry + FileRoot.
+	mut := &handlers.MutationHandler{
+		Root:     s.cfg.FileRoot,
+		Reg:      reg,
+		Notifier: fileNotifier,
+		Logger:   s.cfg.Logger,
+	}
+	s.mux.Handle("POST /api/file/3/files/delete_folder_v3", protect(mut.DeleteFolder))
+
 	// Engine.IO v3 websocket on the same listener (1c). The device connects to
 	// /socket.io/ directly over websocket; demux is by path.
 	s.mux.Handle("/socket.io/", socketio.NewHandler(s.cfg.JWTSecret, s.reg, s.cfg.Logger))

@@ -256,6 +256,24 @@ type FileUploadFinishLocalDTO struct {
 	InnerName   string `json:"innerName"`
 }
 
+// DeleteFolderLocalDTO is the delete_folder_v3 request
+// (com/ratta/file/dto/DeleteFolderLocalDTO.java declares id as Long, but the
+// device sends it as a quoted string — the SPC String-in/Long-out gotcha, §8;
+// parse with ParseInt in the handler).
+type DeleteFolderLocalDTO struct {
+	EquipmentNo string `json:"equipmentNo"`
+	ID          string `json:"id"`
+}
+
+// DeleteFolderLocalVO is the delete_folder_v3 response
+// (com/ratta/file/vo/DeleteFolderLocalVO.java extends BaseVO: equipmentNo,
+// metadata). metadata describes the just-deleted entry.
+type DeleteFolderLocalVO struct {
+	envelope.BaseVO
+	EquipmentNo string      `json:"equipmentNo"`
+	Metadata    *MetadataVO `json:"metadata,omitempty"`
+}
+
 // FileUploadFinishLocalVO is the upload/finish response
 // (com/ratta/file/vo/FileUploadFinishLocalVO.java extends BaseVO). id is a String
 // on the wire here (the SPC id-type split, §8); size is a Long (file bytes).

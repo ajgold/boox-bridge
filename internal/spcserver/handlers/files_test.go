@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"testing"
 
 	"github.com/sysop/ultrabridge/internal/notedb"
@@ -171,6 +172,39 @@ func TestListFolderRecursive(t *testing.T) {
 	// All descendants: Document, Note, Note/Personal, Note/Personal/p.note, Note/foo.note, a.txt = 6.
 	if len(es) != 6 {
 		t.Fatalf("recursive entries = %d; want 6 (%v)", len(es), names(es))
+	}
+}
+
+// TestListFolderExcludesDotDirs: UB's own .staging/.recycle dot-dirs under the
+// root must never surface to the device (flat or recursive).
+func TestListFolderExcludesDotDirs(t *testing.T) {
+	root := t.TempDir()
+	buildTree(t, root)
+	for _, d := range []string{".staging", ".recycle"} {
+		if err := os.MkdirAll(filepath.Join(root, d, "junk"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(root, d, "junk", "x.note"), []byte("x"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	h := newFileHandler(t, root)
+
+	// Flat root listing still has exactly the 3 native top-level entries.
+	flat := entriesOf(t, decodeMap(t, h.ListFolder, `{"equipmentNo":"SN078"}`))
+	if len(flat) != 3 {
+		t.Fatalf("flat entries = %d; want 3 (dot-dirs leaked: %v)", len(flat), names(flat))
+	}
+	// Recursive listing must not include anything under a dot-dir.
+	rec := entriesOf(t, decodeMap(t, h.ListFolder, `{"equipmentNo":"SN078","recursive":true}`))
+	for _, e := range rec {
+		pd, _ := e["path_display"].(string)
+		if strings.Contains(pd, "/.") || strings.HasPrefix(pd, ".") {
+			t.Errorf("recursive listing leaked a dot-path: %q", pd)
+		}
+	}
+	if len(rec) != 6 {
+		t.Fatalf("recursive entries = %d; want 6 (dot-dirs leaked: %v)", len(rec), names(rec))
 	}
 }
 
