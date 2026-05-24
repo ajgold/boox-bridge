@@ -90,17 +90,17 @@ func (s *Store) Stage(innerName string, r io.Reader) (int64, error) {
 // and, on a match, atomically renames it to its target path under FILE_ROOT
 // (SafeResolve-guarded). It returns the absolute promoted path. On any mismatch
 // the staged file is left untouched and the target is never created.
-func (s *Store) Finalize(ctx context.Context, innerName, claimedMD5 string, claimedSize int64) (string, error) {
+//
+// targetRelPath is the root-relative destination the CALLER computes from the
+// upload/finish request (its `path` parent + `fileName`). The promotion target
+// is taken from finish rather than the apply-recorded row because the device's
+// apply and finish disagree on whether `path` includes the filename (apply sends
+// the full path; finish sends the parent dir + a separate fileName — see the §8
+// wire note in docs/spc-protocol.md).
+func (s *Store) Finalize(ctx context.Context, innerName, claimedMD5 string, claimedSize int64, targetRelPath string) (string, error) {
 	src, err := s.stagingPath(innerName)
 	if err != nil {
 		return "", err
-	}
-
-	var targetPath, fileName string
-	if err := s.DB.QueryRowContext(ctx,
-		`SELECT target_path, file_name FROM spc_uploads WHERE inner_name = ?`, innerName).
-		Scan(&targetPath, &fileName); err != nil {
-		return "", fmt.Errorf("staging Finalize lookup %q: %w", innerName, err)
 	}
 
 	fi, err := os.Stat(src)
@@ -118,9 +118,7 @@ func (s *Store) Finalize(ctx context.Context, innerName, claimedMD5 string, clai
 		return "", fmt.Errorf("staging Finalize %q: md5 mismatch (staged %s, claimed %s)", innerName, sum, claimedMD5)
 	}
 
-	// Concatenate raw (not path.Join, which would Clean a "../" escape away
-	// before SafeResolve's depth-walk could reject it).
-	dst, err := mapping.SafeResolve(s.Root, targetPath+"/"+fileName)
+	dst, err := mapping.SafeResolve(s.Root, targetRelPath)
 	if err != nil {
 		return "", fmt.Errorf("staging Finalize %q: %w", innerName, err)
 	}

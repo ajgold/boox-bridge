@@ -73,11 +73,11 @@ func TestFinalizeRejectsMismatch(t *testing.T) {
 	}
 
 	// Wrong md5.
-	if _, err := s.Finalize(ctx, "inner-1", "00000000000000000000000000000000", int64(len(body))); err == nil {
+	if _, err := s.Finalize(ctx, "inner-1", "00000000000000000000000000000000", int64(len(body)), "/Note/foo.note"); err == nil {
 		t.Fatalf("Finalize with wrong md5 should fail")
 	}
 	// Wrong size.
-	if _, err := s.Finalize(ctx, "inner-1", md5Hex(body), 999); err == nil {
+	if _, err := s.Finalize(ctx, "inner-1", md5Hex(body), 999, "/Note/foo.note"); err == nil {
 		t.Fatalf("Finalize with wrong size should fail")
 	}
 	// Target must not exist.
@@ -97,7 +97,7 @@ func TestFinalizePromotes(t *testing.T) {
 		t.Fatalf("Stage: %v", err)
 	}
 
-	abs, err := s.Finalize(ctx, "inner-2", md5Hex(body), int64(len(body)))
+	abs, err := s.Finalize(ctx, "inner-2", md5Hex(body), int64(len(body)), "/Note/Personal/bar.note")
 	if err != nil {
 		t.Fatalf("Finalize: %v", err)
 	}
@@ -128,7 +128,7 @@ func TestFinalizeRefusesTraversal(t *testing.T) {
 	if _, err := s.Stage("inner-3", strings.NewReader(string(body))); err != nil {
 		t.Fatalf("Stage: %v", err)
 	}
-	if _, err := s.Finalize(ctx, "inner-3", md5Hex(body), int64(len(body))); err == nil {
+	if _, err := s.Finalize(ctx, "inner-3", md5Hex(body), int64(len(body)), "/../../etc/passwd"); err == nil {
 		t.Fatalf("Finalize with escaping target should be refused")
 	}
 }

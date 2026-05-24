@@ -344,6 +344,23 @@ Match these verbatim — do not "fix" them:
 | **File IDs** | **`String` in requests** (`download_v3`/`query_v3` send `"id":"16"`), `Long`/`String` in responses | Decompiled DTO says `Long`, but the device sends a **quoted string**. Jackson coerces it server-side; Go's `encoding/json` rejects string→int64, so type the DTO field `string` and `ParseInt` in the handler. **Confirmed from device traffic 2026-05-23** — typing it `*int64` made `download_v3` silently return `E0321` for every real request. |
 | `token` | `LoginVO` | JWT field name |
 
+### Upload `path` means different things in apply vs finish (device-confirmed 2026-05-24)
+
+The device is **inconsistent** about what `path` carries in the two upload calls
+(captured on hardware via the cleartext `:8089` tap):
+
+- **`upload/apply`**: `path` is the **full destination path including the filename**
+  — e.g. `{"path":"/NOTE/Note/20260524_181931 Testy.note","fileName":"20260524_181931 Testy.note","size":57898}` (note `size` is a **number** here).
+- **`upload/finish`**: `path` is the **parent directory** (with a trailing slash) and
+  `fileName` is separate — e.g. `{"path":"/NOTE/Note/","fileName":"20260524_181931 Testy.note","content_hash":"…","innerName":"…","size":"57898"}` (`size` a **string** here).
+
+So the promotion target must be computed at **finish** as `path.Join(finish.path,
+finish.fileName)` — **never** by joining the apply-recorded path with a filename
+(that double-nests into `…/X.note/X.note`). UB ignores apply's `path` for placement
+and trusts finish's parent+fileName. Found because the first device upload created a
+*directory* named like the note containing the note (`staging.Finalize` was joining
+the apply full-path with the fileName).
+
 ## 9. Storage paths and timing constants (SPC-side, FYI)
 
 From `Constant.java` and `application.yml` style references in code:

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"log/slog"
 	"net/http"
+	"path"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -170,7 +171,11 @@ func (h *UploadHandler) Finish(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	size, _ := strconv.ParseInt(req.Size, 10, 64)
-	abs, err := h.Staging.Finalize(r.Context(), req.InnerName, req.ContentHash, size)
+	// The device's finish sends `path` as the PARENT directory plus a separate
+	// `fileName`; join them for the promotion target (apply, by contrast, sends
+	// the full path — do not use the apply-recorded path here). See §8 wire note.
+	target := path.Join(req.Path, req.FileName)
+	abs, err := h.Staging.Finalize(r.Context(), req.InnerName, req.ContentHash, size, target)
 	if err != nil {
 		h.log().Warn("upload/finish verify/promote failed", "innerName", req.InnerName, "err", err)
 		fail()
