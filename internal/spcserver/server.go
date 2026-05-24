@@ -6,9 +6,11 @@
 package spcserver
 
 import (
+	"context"
 	"database/sql"
 	"log/slog"
 	"net/http"
+	"time"
 
 	"github.com/sysop/ultrabridge/internal/spcserver/auth"
 	"github.com/sysop/ultrabridge/internal/spcserver/capacity"
@@ -17,8 +19,10 @@ import (
 	"github.com/sysop/ultrabridge/internal/spcserver/groups"
 	"github.com/sysop/ultrabridge/internal/spcserver/handlers"
 	"github.com/sysop/ultrabridge/internal/spcserver/login"
+	"github.com/sysop/ultrabridge/internal/spcserver/notify"
 	"github.com/sysop/ultrabridge/internal/spcserver/oss"
 	"github.com/sysop/ultrabridge/internal/spcserver/socketio"
+	"github.com/sysop/ultrabridge/internal/spcserver/staging"
 )
 
 // Config holds the SPC server's runtime configuration, populated from appconfig
@@ -56,9 +60,10 @@ type Config struct {
 // Server is the SPC HTTP + Engine.IO server, both served on one listener. It is
 // constructed only when Mode == "server"; in "client" mode main.go never calls New.
 type Server struct {
-	cfg Config
-	mux *http.ServeMux
-	reg *socketio.Registry
+	cfg     Config
+	mux     *http.ServeMux
+	reg     *socketio.Registry
+	staging *staging.Store // upload staging area; nil when FileRoot is empty
 }
 
 // New builds the server, registering all routes on its mux.
@@ -171,17 +176,62 @@ func (s *Server) registerRoutes() {
 	s.mux.Handle("POST /api/oss/generate/download/url", protect(dl.GenerateDownloadURL))
 	s.mux.HandleFunc("GET /api/oss/download", dl.DownloadStream)
 
+	// File upload (Phase 4) — write path. apply/finish are JWT-protected business
+	// calls; POST /api/oss/upload sinks the bytes and is authenticated by the
+	// query-string signature alone (NOT JWT — the device POSTs opaquely, like the
+	// download GET). The staging store is kept on s for Run's orphan sweeper.
+	// FileNotifier nudges the device to re-pull files after a finish (best-effort).
+	if s.cfg.FileRoot != "" {
+		s.staging = &staging.Store{Root: s.cfg.FileRoot, DB: s.cfg.DB}
+	}
+	fileNotifier := notify.NewSocketNotifier(
+		s.reg,
+		func(ctx context.Context) (string, error) { return store.Get(ctx, auth.UserIDSettingKey) },
+		s.cfg.Logger,
+	)
+	up := &handlers.UploadHandler{
+		Root:     s.cfg.FileRoot,
+		Reg:      reg,
+		Signer:   &oss.Signer{Secret: s.cfg.OssSecret},
+		Staging:  s.staging,
+		Notifier: fileNotifier,
+		Logger:   s.cfg.Logger,
+	}
+	s.mux.Handle("POST /api/file/3/files/upload/apply", protect(up.Apply))
+	s.mux.Handle("POST /api/file/2/files/upload/finish", protect(up.Finish))
+	s.mux.HandleFunc("POST /api/oss/upload", up.UploadStream)
+
 	// Engine.IO v3 websocket on the same listener (1c). The device connects to
 	// /socket.io/ directly over websocket; demux is by path.
 	s.mux.Handle("/socket.io/", socketio.NewHandler(s.cfg.JWTSecret, s.reg, s.cfg.Logger))
 }
 
+// uploadSweepInterval is how often Run reclaims abandoned upload stages whose
+// TTL has expired (applies that never finished).
+const uploadSweepInterval = 10 * time.Minute
+
 // Run binds the listener and serves until error. TLS is used when both cert and
 // key are set; otherwise plain HTTP (TLS is typically terminated upstream by
-// the reverse proxy in this deployment).
+// the reverse proxy in this deployment). It also starts the upload orphan
+// sweeper (only when a staging area exists); the sweeper lives for the process,
+// so it is started here rather than in New (which httptest also calls).
 func (s *Server) Run() error {
+	if s.staging != nil {
+		go s.sweepUploads()
+	}
 	if s.cfg.TLSCert != "" && s.cfg.TLSKey != "" {
 		return http.ListenAndServeTLS(s.cfg.ListenAddr, s.cfg.TLSCert, s.cfg.TLSKey, s.mux)
 	}
 	return http.ListenAndServe(s.cfg.ListenAddr, s.mux)
+}
+
+// sweepUploads periodically reclaims expired upload stages.
+func (s *Server) sweepUploads() {
+	ticker := time.NewTicker(uploadSweepInterval)
+	defer ticker.Stop()
+	for range ticker.C {
+		if err := s.staging.Sweep(context.Background()); err != nil && s.cfg.Logger != nil {
+			s.cfg.Logger.Warn("spc upload stage sweep failed", "err", err)
+		}
+	}
 }

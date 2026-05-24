@@ -78,3 +78,32 @@ func TestDownloadAuthBoundary(t *testing.T) {
 		t.Errorf("GET /api/oss/download with bad signature: got %d, want 500", dlrec.Code)
 	}
 }
+
+func TestUploadAuthBoundary(t *testing.T) {
+	srv := newTestServer()
+
+	// apply + finish with no token → E0712 envelope (JWT-protected).
+	for _, path := range []string{"/api/file/3/files/upload/apply", "/api/file/2/files/upload/finish"} {
+		req := httptest.NewRequest(http.MethodPost, path, nil)
+		rec := httptest.NewRecorder()
+		srv.Handler().ServeHTTP(rec, req)
+		if !strings.Contains(rec.Body.String(), "E0712") {
+			t.Errorf("%s without token: body %q lacks E0712 (must be JWT-protected)", path, rec.Body.String())
+		}
+	}
+
+	// POST /api/oss/upload with no token must reach the handler: not 404, not
+	// E0712. With an invalid signature it returns the SPC 500 plain-text failure.
+	up := httptest.NewRequest(http.MethodPost, "/api/oss/upload?path=x&signature=y&timestamp=0&nonce=n", nil)
+	uprec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(uprec, up)
+	if uprec.Code == http.StatusNotFound {
+		t.Fatalf("POST /api/oss/upload not mounted (404)")
+	}
+	if strings.Contains(uprec.Body.String(), "E0712") {
+		t.Errorf("POST /api/oss/upload is behind the JWT gate (got E0712); it must be signature-only")
+	}
+	if uprec.Code != http.StatusInternalServerError {
+		t.Errorf("POST /api/oss/upload with bad signature: got %d, want 500", uprec.Code)
+	}
+}

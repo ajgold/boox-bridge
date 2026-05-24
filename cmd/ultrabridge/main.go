@@ -43,6 +43,7 @@ import (
 	spcauth "github.com/sysop/ultrabridge/internal/spcserver/auth"
 	"github.com/sysop/ultrabridge/internal/spcserver/fileids"
 	"github.com/sysop/ultrabridge/internal/spcserver/notify"
+	"github.com/sysop/ultrabridge/internal/spcserver/staging"
 	"github.com/sysop/ultrabridge/internal/sync"
 	"github.com/sysop/ultrabridge/internal/taskdb"
 	"github.com/sysop/ultrabridge/internal/tasksync"
@@ -437,6 +438,12 @@ func main() {
 		// but must not stop the server (task sync still works).
 		if err := fileids.Migrate(context.Background(), noteDB); err != nil {
 			logger.Error("spc fileids migration failed; file listing disabled", "err", err)
+		}
+		// Phase 4 upload: migrate the spc_uploads staging table (same server-mode
+		// gating). Best-effort — a failure disables upload but must not stop the
+		// server.
+		if err := staging.Migrate(context.Background(), noteDB); err != nil {
+			logger.Error("spc staging migration failed; upload disabled", "err", err)
 		}
 		// Phase 3 download: ensure a persistent OSS signing secret exists
 		// (auto-generated on first boot). Best-effort — on failure we fall back
