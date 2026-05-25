@@ -8,6 +8,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DEFAULT_PORT="8443"
 DEFAULT_MCP_PORT="8081"
+DEFAULT_SPC_PORT="8089"
 DEFAULT_USERNAME="admin"
 
 if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
@@ -26,8 +27,8 @@ Options:
   --nuke          Delete ALL UltraBridge data before installing
                   (removes entire ultrabridge-data/ directory)
   -y, --unattended  Non-interactive mode. Reads port, username, password from
-                    environment variables: UB_PORT, UB_MCP_PORT, UB_USERNAME,
-                    UB_PASSWORD
+                    environment variables: UB_PORT, UB_MCP_PORT, UB_SPC_PORT,
+                    UB_USERNAME, UB_PASSWORD
   -h, --help      Show this help message
 
 Prerequisites:
@@ -157,6 +158,7 @@ prompt UB_USERNAME "Username" "${UB_USERNAME:-$DEFAULT_USERNAME}"
 prompt_password UB_PASSWORD "Password"
 prompt UB_PORT "UltraBridge port to expose on host" "${UB_PORT:-$DEFAULT_PORT}"
 prompt UB_MCP_PORT "MCP server port to expose on host" "${UB_MCP_PORT:-$DEFAULT_MCP_PORT}"
+prompt UB_SPC_PORT "Supernote (SPC) device-sync port to expose on host" "${UB_SPC_PORT:-$DEFAULT_SPC_PORT}"
 
 echo
 
@@ -175,36 +177,15 @@ info "Generating docker-compose.yml"
 
 mkdir -p "$DATA_DIR"
 
-# Detect if Supernote Private Cloud is running and join its network if it is.
-SN_NETWORK=""
-if docker ps --format '{{.Names}}' | grep -q "^supernote-service$"; then
-    SN_NETWORK=$(docker inspect supernote-service --format '{{range $net, $conf := .NetworkSettings.Networks}}{{$net}}{{end}}' 2>/dev/null || true)
-    if [[ -n "$SN_NETWORK" ]]; then
-        ok "Detected Supernote Private Cloud network: $SN_NETWORK"
-    fi
-fi
-
-# Detect if Supernote directory exists and mount it if it does.
+# Mount the Supernote storage tree if present. UltraBridge is the SPC server the
+# device syncs against; this directory holds the SPC file root (e.g.
+# /mnt/supernote/ub_sn_files) the device browses. UB no longer connects out to a
+# `supernote-service` container, so there's no SPC network to join.
 VOLUMES_BLOCK="      - ./ultrabridge-data:/data"
 if [[ -d "/mnt/supernote" ]]; then
     ok "Detected Supernote directory at /mnt/supernote"
     VOLUMES_BLOCK="$VOLUMES_BLOCK
       - /mnt/supernote:/mnt/supernote"
-fi
-
-NETWORKS_BLOCK=""
-JOIN_NETWORKS=""
-if [[ -n "$SN_NETWORK" ]]; then
-    JOIN_NETWORKS="
-    networks:
-      - default
-      - $SN_NETWORK"
-    NETWORKS_BLOCK="
-networks:
-  default:
-    name: ultrabridge_default
-  $SN_NETWORK:
-    external: true"
 fi
 
 cat > "$SCRIPT_DIR/docker-compose.yml" <<EOF
@@ -218,13 +199,16 @@ services:
     container_name: ultrabridge
     ports:
       - "${UB_PORT}:8443"
+      # Supernote device-sync (SPC) server. Only listens when
+      # Settings > UB-as-SPC Device Sync Server > Mode = server.
+      - "${UB_SPC_PORT}:8089"
     environment:
       - UB_DB_PATH=/data/ultrabridge.db
       - UB_LISTEN_ADDR=:8443
       - UB_TASK_DB_PATH=/data/ultrabridge-tasks.db
       - UB_MCP_PORT=${UB_MCP_PORT}
     volumes:
-$VOLUMES_BLOCK$JOIN_NETWORKS
+$VOLUMES_BLOCK
     restart: unless-stopped
   ub-mcp:
     image: ub-mcp:latest
@@ -245,7 +229,7 @@ $VOLUMES_BLOCK$JOIN_NETWORKS
     depends_on:
       - ultrabridge
     command: ["--http", ":8081"]
-    restart: unless-stopped$NETWORKS_BLOCK
+    restart: unless-stopped
 EOF
 
 ok "Docker Compose file written"
@@ -311,6 +295,12 @@ echo "  Username: $UB_USERNAME"
 echo "  Password: (the one you just entered)"
 echo
 echo "  Complete configuration in the Settings UI."
+echo
+echo "  Supernote sync (SPC) is exposed on host port ${UB_SPC_PORT} (-> :8089)."
+echo "  Enable it under Settings > UB-as-SPC Device Sync Server (Mode = server),"
+echo "  then restart. Behind a reverse proxy it needs its OWN hostname routing to"
+echo "  :8089, separate from the web UI host on ${UB_PORT}. See README:"
+echo "  \"Reverse Proxy & Device Hostnames\"."
 echo
 info "MCP server is running!"
 echo

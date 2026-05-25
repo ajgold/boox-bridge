@@ -37,9 +37,11 @@ UltraBridge is a note management and task synchronization platform supporting mu
 ./install.sh
 ```
 
-The installer prompts for **3 things**: port (default 8443), username, and password. It builds the Docker image, generates a minimal `docker-compose.yml`, starts the container, and seeds your credentials.
+The installer prompts for a username, a password, and three host ports: the web UI (default 8443), the MCP server (default 8081), and the Supernote SPC device-sync server (default 8089). It builds the images, generates a `docker-compose.yml` that publishes all three, starts the containers, and seeds your credentials.
 
 Open the URL shown (e.g., `http://localhost:8443`), log in, and configure everything else via the **Settings** tab: device sources, OCR, RAG search, chat.
+
+The SPC port (8089) is published but idle until you set **Settings > UB-as-SPC Device Sync Server > Mode** to `server` and restart. To sync a Supernote you'll also need a reverse proxy with a dedicated hostname for that port — see [Reverse Proxy & Device Hostnames](#reverse-proxy--device-hostnames).
 
 To rebuild after pulling changes:
 
