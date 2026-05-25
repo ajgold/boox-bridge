@@ -77,10 +77,12 @@ stack is built and soaked.** Real-SPC flip-back stays a working escape hatch.
   `F_FileLocalWebController` incl. recycle-browse/restore + file search, `F_ShareController`)
   + its own login flow (`loginMethod=1` phone) + sharing semantics. A separate project.
   Point Partner at UB today → 404s.
-- **Other no-analogue user-triggered features** (dictionary, note export, sharing).
+- **Other no-analogue user-triggered features** (note export, sharing).
   Currently 404'd on weak "not seen in 0b" evidence — the 0b soak is a *passive* trace
   and under-weights user-initiated endpoints. **Re-verify each with a deliberate
   on-device action before assuming the user won't hit it.** → `spc-no-analogue-features.md`.
+  (Dictionary/Reference and file "label" search were reclassified to accept-loss on
+  2026-05-25 — they're backend plumbing, not user features; see that doc.)
 
 ## 5. Housekeeping
 
