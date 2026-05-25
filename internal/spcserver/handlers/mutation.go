@@ -151,7 +151,7 @@ func (h *MutationHandler) Move(w http.ResponseWriter, r *http.Request) {
 		fail(errMoveMissingCode, errMoveMissingMsg)
 		return
 	}
-	dest, code := h.targetPath(req.ToPath, filepath.Base(src), req.Autorename)
+	dest, code := h.targetPath(req.ToPath, req.Autorename)
 	if code != "" {
 		fail(codeMsg(code))
 		return
@@ -192,7 +192,7 @@ func (h *MutationHandler) Copy(w http.ResponseWriter, r *http.Request) {
 		fail(errCopyMissingCode, errCopyMissingMsg)
 		return
 	}
-	dest, code := h.targetPath(req.ToPath, filepath.Base(src), req.Autorename)
+	dest, code := h.targetPath(req.ToPath, req.Autorename)
 	if code != "" {
 		fail(codeMsg(code))
 		return
@@ -223,25 +223,27 @@ func (h *MutationHandler) resolveSource(r *http.Request, rawID string) (id int64
 	return id, p, true
 }
 
-// targetPath resolves the destination for fileName under the to_path parent
-// directory (traversal-guarded). On a name collision it returns errSameNameCode
-// unless autorename is set, in which case it appends " (n)" until free.
-func (h *MutationHandler) targetPath(toPath, fileName string, autorename bool) (dest, code string) {
-	destDir, err := mapping.SafeResolve(h.Root, toPath)
+// targetPath resolves the move/copy destination. The device sends `to_path` as
+// the FULL destination path (including the new filename), NOT a parent directory
+// — despite the decompiled "Target parent directory" annotation. Confirmed on
+// hardware 2026-05-24: a rename sent to_path=/NOTE/Note/<newname>.note (see §8).
+// Traversal-guarded. On a collision it returns errSameNameCode unless autorename
+// is set, in which case it appends " (n)" before the extension until free.
+func (h *MutationHandler) targetPath(toPath string, autorename bool) (dest, code string) {
+	dest, err := mapping.SafeResolve(h.Root, toPath)
 	if err != nil {
-		return "", errSameNameCode // escaping path: refuse like a collision (never write outside root)
+		return "", errSameNameCode // escaping path: refuse (never write outside root)
 	}
-	cand := filepath.Join(destDir, fileName)
-	if _, err := os.Lstat(cand); os.IsNotExist(err) {
-		return cand, ""
+	if _, err := os.Lstat(dest); os.IsNotExist(err) {
+		return dest, ""
 	}
 	if !autorename {
 		return "", errSameNameCode
 	}
-	ext := filepath.Ext(fileName)
-	base := strings.TrimSuffix(fileName, ext)
+	ext := filepath.Ext(dest)
+	base := strings.TrimSuffix(dest, ext)
 	for n := 1; n < 1000; n++ {
-		cand = filepath.Join(destDir, fmt.Sprintf("%s (%d)%s", base, n, ext))
+		cand := fmt.Sprintf("%s (%d)%s", base, n, ext)
 		if _, err := os.Lstat(cand); os.IsNotExist(err) {
 			return cand, ""
 		}

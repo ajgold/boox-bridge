@@ -361,6 +361,15 @@ and trusts finish's parent+fileName. Found because the first device upload creat
 *directory* named like the note containing the note (`staging.Finalize` was joining
 the apply full-path with the fileName).
 
+### `move_v3`/`copy_v3` `to_path` is the full destination path (device-confirmed 2026-05-24)
+
+Despite the decompiled `@ApiModelProperty("Target parent directory")`, the device
+sends `to_path` as the **full destination path including the (new) filename**, NOT
+a parent dir. A device rename sent `{"id":"862","to_path":"/NOTE/Note/<newname>.note","autorename":false}`.
+So the move/copy target is `SafeResolve(to_path)` directly — do **not** join the
+source basename onto it (same double-nesting bug as upload: it produced
+`…/<newname>.note/<oldname>.note`). The new filename is `filepath.Base(to_path)`.
+
 ## 9. Storage paths and timing constants (SPC-side, FYI)
 
 From `Constant.java` and `application.yml` style references in code:

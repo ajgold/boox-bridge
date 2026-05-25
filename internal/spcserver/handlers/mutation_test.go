@@ -118,8 +118,9 @@ func TestMovePreservesID(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	// to_path is the FULL destination path (incl. filename), not a parent dir.
 	out := decodeMap(t, h.Move,
-		`{"equipmentNo":"SN078","id":"`+strconv.FormatInt(id, 10)+`","to_path":"/Document"}`)
+		`{"equipmentNo":"SN078","id":"`+strconv.FormatInt(id, 10)+`","to_path":"/Document/m.note"}`)
 	if out["success"] != true {
 		t.Fatalf("move success = %v (%v)", out["success"], out)
 	}
@@ -156,7 +157,7 @@ func TestCopyFreshID(t *testing.T) {
 	}
 
 	out := decodeMap(t, h.Copy,
-		`{"equipmentNo":"SN078","id":"`+strconv.FormatInt(id, 10)+`","to_path":"/Document"}`)
+		`{"equipmentNo":"SN078","id":"`+strconv.FormatInt(id, 10)+`","to_path":"/Document/c.note"}`)
 	if out["success"] != true {
 		t.Fatalf("copy success = %v (%v)", out["success"], out)
 	}
@@ -184,13 +185,13 @@ func TestCopyCollision(t *testing.T) {
 	id, _ := reg.IDFor(context.Background(), src)
 	idStr := strconv.FormatInt(id, 10)
 
-	// autorename=false → E0322
-	out := decodeMap(t, h.Copy, `{"equipmentNo":"SN078","id":"`+idStr+`","to_path":"/Document","autorename":false}`)
+	// autorename=false → E0322 (to_path is the full destination path)
+	out := decodeMap(t, h.Copy, `{"equipmentNo":"SN078","id":"`+idStr+`","to_path":"/Document/dup.note","autorename":false}`)
 	if out["success"] != false || out["errorCode"] != errSameNameCode {
 		t.Fatalf("collision w/o autorename: want E0322, got %v", out)
 	}
 	// autorename=true → "dup (1).note"
-	out = decodeMap(t, h.Copy, `{"equipmentNo":"SN078","id":"`+idStr+`","to_path":"/Document","autorename":true}`)
+	out = decodeMap(t, h.Copy, `{"equipmentNo":"SN078","id":"`+idStr+`","to_path":"/Document/dup.note","autorename":true}`)
 	if out["success"] != true {
 		t.Fatalf("collision w/ autorename should succeed, got %v", out)
 	}
