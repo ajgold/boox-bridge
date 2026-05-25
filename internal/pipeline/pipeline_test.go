@@ -201,6 +201,27 @@ func TestEnqueue_SkipsConflictFiles(t *testing.T) {
 	}
 }
 
+// TestEnqueue_PublicWrapper_FKSafe: the exported Enqueue upserts the notes row
+// before inserting the job, so a fresh (never-seen) file enqueues without the
+// jobs.note_path → notes(path) FK violation that a raw processor.Enqueue hits.
+// Reproduces the Phase 4d hardware bug where the upload OCR-kick called
+// processor.Enqueue directly and failed with "FOREIGN KEY constraint failed".
+func TestEnqueue_PublicWrapper_FKSafe(t *testing.T) {
+	ns, proc, dir := openTestComponents(t)
+	pl := New(Config{NotesPath: dir, Store: ns, Proc: proc, Logger: slog.Default()})
+
+	p := filepath.Join(dir, "uploaded.note")
+	if err := os.WriteFile(p, []byte("device upload bytes"), 0644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	if err := pl.Enqueue(context.Background(), p); err != nil {
+		t.Fatalf("Enqueue: %v", err)
+	}
+	if proc.Status().Pending != 1 {
+		t.Fatalf("pending = %d, want 1 (Enqueue must upsert then queue)", proc.Status().Pending)
+	}
+}
+
 // TestPipeline_MoveDetection_ContentChanged verifies AC1.4:
 // when the moved file has different content, it gets enqueued normally.
 func TestPipeline_MoveDetection_ContentChanged(t *testing.T) {

@@ -462,8 +462,12 @@ func main() {
 		var spcEnqueuer spcserver.UploadEnqueuerFunc
 		for _, s := range sources {
 			if snSrc, ok := s.(*supernote.Source); ok {
-				proc := snSrc.Processor()
-				spcEnqueuer = func(ctx context.Context, path string) error { return proc.Enqueue(ctx, path) }
+				// Route through the pipeline's enqueue (UpsertFile → dedup →
+				// processor) — NOT processor.Enqueue directly, which violates the
+				// jobs.note_path → notes(path) FK because the notes row won't exist
+				// yet for a freshly-uploaded file.
+				pl := snSrc.Pipeline()
+				spcEnqueuer = func(ctx context.Context, path string) error { return pl.Enqueue(ctx, path) }
 			}
 		}
 		spcSrv = spcserver.New(spcserver.Config{

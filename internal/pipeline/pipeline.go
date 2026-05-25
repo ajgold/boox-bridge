@@ -152,3 +152,16 @@ func (p *Pipeline) enqueue(ctx context.Context, path string) {
 	}
 }
 
+// Enqueue runs the full file-detection enqueue (UpsertFile → dedup → processor
+// enqueue) for a single path — the same logic the watcher and reconciler use.
+// Exposed for the SPC upload write-path (Phase 4d) so a freshly-promoted upload
+// is kicked through the FK-safe path; calling processor.Enqueue directly would
+// violate the jobs.note_path → notes(path) foreign key (the notes row must exist
+// first). Safe to call even though the watcher also covers NotesPath — the
+// processor's enqueue is idempotent (ON CONFLICT) and the hash dedup skips
+// re-processing UB's own writes.
+func (p *Pipeline) Enqueue(ctx context.Context, path string) error {
+	p.enqueue(ctx, path)
+	return nil
+}
+
