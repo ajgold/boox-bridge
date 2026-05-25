@@ -474,23 +474,25 @@ Phase 4 merged + hardware-validated 2026-05-25; NPM flipped back to real SPC (no
 
 ---
 
-## Phase D: Digest support (first-class) — D1 BUILT 2026-05-25, pending hardware validation
+## Phase D: Digest support (first-class) — D1 DONE + hardware-validated 2026-05-25
 
 The Supernote **Digest** feature (the SPC API calls it "summary") is a first-class
 capability for this platform — a digest is a user-curated saved excerpt from a
 notebook plus a handwritten `.mark` annotation, organized into groups with tags.
 Split into three sub-phases (plan: `~/.claude/plans/okay-so-we-have-sunny-flame.md`):
 
-**D1 — protocol round-trip: BUILT (pending hardware validation).** The real
+**D1 — protocol round-trip: DONE + hardware-validated 2026-05-25.** The real
 `F_SummaryController` surface (`add/update/delete summary` + `…/group` + `…/tag` +
 `query/summary{,/hash,/id,/group}` + `.mark` `upload/apply/summary` +
 `download/summary`) is implemented over `internal/digeststore` (the canonical store,
 faithful to `t_summary`/`t_summary_tag`) via `internal/spcserver/handlers/summary.go`.
 `.mark` blobs reuse the Phase 3/4 OSS signed-URL + staging path (`.digests/`). Purely
 additive: when no `DigestStore` is wired the three query endpoints fall back to the
-old empty-success stubs and the writes 404. **Owed:** drive the device (NPM flip +
-`:8089` tcpdump) to confirm round-trip + `.mark` + the capture-pending field casings
-(`createTime`/`updateTime` form, `partUploadUrl`/chunking — `spc-protocol.md §8`).
+old empty-success stubs and the writes 404. Validated on the Nomad both directions
+(push/pull/`.mark` byte-exact/delete/update); wire findings + the two fixes
+(item-identity-in-metadata, `metadataMap` numeric preservation) and the
+device-authoritative-delete semantic are in `spc-protocol.md §8` + memory
+`project_spc_phaseD_digests`.
 
 **D2 — UB-native surfacing (not built):**
 - index digest `content` into FTS (`digest_content`/`digest_fts` mirroring `note_fts`)

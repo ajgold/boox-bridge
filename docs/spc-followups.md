@@ -37,12 +37,15 @@ stack is built and soaked.** Real-SPC flip-back stays a working escape hatch.
   excerpts + handwritten `.mark` annotations); **NOT** superseded by RAG. Split into
   D1 (protocol round-trip), D2 (UB-native surfacing), D3 (proactive push). Plan:
   `~/.claude/plans/okay-so-we-have-sunny-flame.md`.
-  - **D1 — protocol round-trip: BUILT 2026-05-25, pending hardware validation.** Full
+  - **D1 — protocol round-trip: DONE + hardware-validated 2026-05-25.** Full
     `F_SummaryController` over `internal/digeststore` via `handlers/summary.go` (item/
     group/tag CRUD + queries + `.mark` over the OSS path). Additive (nil-DigestStore →
-    old stubs). **Owed:** drive the device (NPM flip + tcpdump) to confirm round-trip +
-    `.mark` + the capture-pending field casings (`createTime`/`updateTime` form,
-    `partUploadUrl`/chunking) — `spc-protocol.md §8`. Then commit as "validated".
+    old stubs). Validated on the Nomad both directions (push/pull/.mark byte-exact/
+    delete/update); wire findings + fixes in `spc-protocol.md §8` and memory
+    `project_spc_phaseD_digests`. **New follow-up surfaced:** digest delete is
+    device-authoritative — a server-only soft-delete does NOT propagate (device
+    re-asserts via `update/summary`, which UB no-ops → benign re-push divergence). A
+    future UB/web-initiated digest delete (D2) needs a **tombstone** the device honors.
   - **D2 — UB-native surfacing (not built).** Index digest `content` into FTS
     (`digest_content`/`digest_fts`) + RAG-embed + a `DigestService` + `internal/web`
     Digests tab + `/api/v1/digests`. Where digests become first-class *inside* UB.
@@ -83,6 +86,16 @@ stack is built and soaked.** Real-SPC flip-back stays a working escape hatch.
 
 - `docker-compose.yml` stays uncommitted (carries the device password); the
   `UB_SPC_FILE_ROOT=/mnt/supernote/ub_sn_files` change rides along uncommitted.
+- **Stop running UB as root (future builds).** The `ultrabridge` image has no `USER`
+  directive so the container runs as `uid=0` — a holdover from the real SPC running as
+  root. Consequence: everything UB materializes under `UB_SPC_FILE_ROOT`
+  (`NOTE/DOCUMENT/EXPORT/…` buckets, `.staging/`, `.recycle/`, uploaded `.note`s) is
+  `root:root` on the host, so the operator can't manage/back-up those files without
+  `sudo`, and the container holds more privilege than it needs. Fix (deferred so it
+  doesn't perturb live device validation): either add `user: "1000:1000"` to the compose
+  service or bake a non-root `USER` into the Dockerfile, then one-time
+  `chown -R 1000:1000 /mnt/supernote/ub_sn_files` (and confirm `/data` + the OCR
+  pipeline still read/write under the new uid). Owner preference: get UB off root.
 
 ## Process reminders earned this session (carry into Phase 5 + Digests)
 

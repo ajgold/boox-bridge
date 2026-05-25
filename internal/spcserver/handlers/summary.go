@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"path"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/sysop/ultrabridge/internal/digeststore"
@@ -77,10 +78,20 @@ func (h *SummaryHandler) AddSummary(w http.ResponseWriter, r *http.Request) {
 
 	h.promoteMark(r.Context(), req.HandwriteInnerName, req.HandwriteMD5)
 
-	// Upsert by uniqueIdentifier so a full re-sync doesn't duplicate.
-	if req.UniqueIdentifier != "" {
-		if existing, err := h.Store.GetByUniqueIdentifier(r.Context(), uid, req.UniqueIdentifier); err == nil {
-			applyAddToDigest(existing, &req)
+	// An item's stable identity is its metadata.unique_identifier, NOT the
+	// top-level uniqueIdentifier (which the device leaves empty for items —
+	// device-confirmed 2026-05-25, see spc-protocol.md §8). Dedup on whichever is
+	// present (top-level for the group-like case, metadata otherwise) and persist
+	// it in the unique_identifier column so a re-push never duplicates.
+	effectiveUID := req.UniqueIdentifier
+	if effectiveUID == "" {
+		effectiveUID = metadataUID(req.Metadata)
+	}
+
+	// Upsert by the effective identity so a full re-sync doesn't duplicate.
+	if effectiveUID != "" {
+		if existing, err := h.Store.GetByUniqueIdentifier(r.Context(), uid, effectiveUID); err == nil {
+			applyAddToDigest(existing, &req, effectiveUID)
 			if err := h.Store.Update(r.Context(), existing); err != nil {
 				h.internalErr(w, "add/summary update", err)
 				return
@@ -91,7 +102,7 @@ func (h *SummaryHandler) AddSummary(w http.ResponseWriter, r *http.Request) {
 	}
 
 	d := &digeststore.Digest{UserID: uid}
-	applyAddToDigest(d, &req)
+	applyAddToDigest(d, &req, effectiveUID)
 	id, err := h.Store.Create(r.Context(), d)
 	if err != nil {
 		h.internalErr(w, "add/summary create", err)
@@ -481,9 +492,11 @@ func (h *SummaryHandler) internalErr(w http.ResponseWriter, op string, err error
 // --- mapping helpers ---
 
 // applyAddToDigest overlays an AddSummaryDTO onto a (new or existing) item.
-func applyAddToDigest(d *digeststore.Digest, req *dto.AddSummaryDTO) {
+// effectiveUID is the resolved stable identity (top-level uniqueIdentifier, or
+// metadata.unique_identifier for items) — stored so the item is dedupable.
+func applyAddToDigest(d *digeststore.Digest, req *dto.AddSummaryDTO, effectiveUID string) {
 	d.IsGroup = false
-	d.UniqueIdentifier = req.UniqueIdentifier
+	d.UniqueIdentifier = effectiveUID
 	d.FileID = req.FileID
 	d.ParentUniqueIdentifier = req.ParentUniqueIdentifier
 	d.Content = req.Content
@@ -549,15 +562,27 @@ func ynOf(b bool) string {
 	return "N"
 }
 
+// metadataUID extracts the item's stable identity from its metadata JSON
+// (the device puts it in metadata.unique_identifier, not the top-level field).
+// Returns "" if absent/unparseable.
+func metadataUID(metadata string) string {
+	return parseMetadataMap(metadata)["unique_identifier"]
+}
+
 // parseMetadataMap converts the stored metadata JSON string into the
-// Map<String,String> the device's SummaryInfoVO carries. Non-string values are
-// stringified; an empty/invalid metadata yields nil (serialized as null).
+// Map<String,String> the device's SummaryInfoVO carries. Decoding uses
+// json.Number so numeric values keep their literal form — without it, a large
+// int like source_size 18992668 decodes to float64 and stringifies as
+// "1.8992668e+07" (device-confirmed corruption, 2026-05-25). An empty/invalid
+// metadata yields nil (serialized as null).
 func parseMetadataMap(s string) map[string]string {
 	if s == "" {
 		return nil
 	}
+	dec := json.NewDecoder(strings.NewReader(s))
+	dec.UseNumber()
 	var raw map[string]any
-	if err := json.Unmarshal([]byte(s), &raw); err != nil {
+	if err := dec.Decode(&raw); err != nil {
 		return nil
 	}
 	out := make(map[string]string, len(raw))
@@ -565,8 +590,15 @@ func parseMetadataMap(s string) map[string]string {
 		switch vv := v.(type) {
 		case string:
 			out[k] = vv
+		case json.Number:
+			out[k] = vv.String()
+		case nil:
+			out[k] = ""
+		case bool:
+			out[k] = strconv.FormatBool(vv)
 		default:
-			out[k] = fmt.Sprintf("%v", vv)
+			b, _ := json.Marshal(vv)
+			out[k] = string(b)
 		}
 	}
 	return out

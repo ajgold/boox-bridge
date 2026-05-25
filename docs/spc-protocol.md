@@ -385,22 +385,47 @@ So the move/copy target is `SafeResolve(to_path)` directly — do **not** join t
 source basename onto it (same double-nesting bug as upload: it produced
 `…/<newname>.note/<oldname>.note`). The new filename is `filepath.Base(to_path)`.
 
-### Summary (digest) DTO casing (Phase D — verify on capture)
+### Summary (digest) DTO casing + sync semantics (Phase D — hardware-confirmed 2026-05-25)
 
 Unlike the file DTOs (snake_case: `to_path`, `content_hash`), the `F_SummaryController`
 DTOs/VOs carry **no `@JsonProperty`** and so serialize their **camelCase** Java field
 names verbatim (`uniqueIdentifier`, `parentUniqueIdentifier`, `md5Hash`,
-`sourceType`, …). Two specific traps confirmed against the decompiled source:
+`sourceType`, …). Confirmed against the decompiled source AND a live device trace:
 
 - **`handwriteMD5` (uppercase) in the request/domain, but `handwriteMd5` (lowercase
   d5) in the response `SummaryInfoVO`** (`SummaryInfoVO.java:15`). UB models both exactly.
 - **`SummaryDO.isSummaryGroup` and `isDeleted` are Strings `"Y"`/`"N"`, not booleans**
   (`SummaryDO.java:25,36`).
-- **CAPTURE-PENDING:** `SummaryDO.createTime`/`updateTime` are `java.util.Date`; their
-  wire form (epoch-millis number vs ISO-8601 string) has not been observed. UB emits
-  omitempty millis for now (server bookkeeping the device diffs on `md5Hash`, not these).
-  `upload/apply/summary` returns `partUploadUrl` empty (`.mark` files are single-shot);
-  confirm the device doesn't chunk. Verify all three against a real device trace.
+- **`createTime`/`updateTime` are epoch-millis NUMBERS** (device-confirmed: it pulled a
+  populated `query/summary/id` carrying `"createTime":1779683680101` and accepted it).
+  UB emits omitempty millis — correct.
+- **`upload/apply/summary` returns `partUploadUrl:""`** — device-confirmed to use the
+  single-shot `fullUploadUrl` for a 29 KB `.mark` (no chunking). The real *file*-upload
+  apply VO also carries `bucketName`/`xAmzDate`/`authorization` S3 fields; the device does
+  NOT need them on the digest apply (UB's lean 3-field VO was accepted).
+
+**Item identity lives in `metadata`, not the top-level fields** (device-confirmed): on
+`add/summary` the device sends an empty top-level `uniqueIdentifier` (and no top-level
+`author`/`fileId`/`tags`); the item's stable id is `metadata.unique_identifier` and the
+author is `metadata.author`. UB stores `metadata` verbatim (lossless round-trip) and lifts
+`metadata.unique_identifier` into the `unique_identifier` column for dedup. PDF digests are
+`sourceType:1` with a `metadata.document_location_data` chapter/page span; note digests are
+`sourceType:2` with `note_fileId`/`note_pageId`/`note_page`.
+
+**`metadataMap` (in `query/summary/hash`) must preserve numeric literals** — decode with
+`json.UseNumber`, else a number like `source_size:18992668` stringifies as
+`"1.8992668e+07"` (device-confirmed corruption, fixed).
+
+**Digest sync is DEVICE-AUTHORITATIVE on delete** (device-confirmed): a digest deleted on
+the device sends `DELETE /delete/summary {"id":N}` (UB soft-deletes — works). But a
+digest soft-deleted **server-side only** does NOT propagate down — the device, seeing its
+local digest missing from `query/summary/hash`, **re-asserts it via `PUT /update/summary`**.
+UB currently no-ops that update (its `GetByID` excludes soft-deleted), so the row stays
+deleted while the device keeps re-pushing → benign perpetual re-push + divergence. Fine for
+D1 (device round-trip); a future UB/web-initiated digest delete needs a **tombstone** the
+device honors (D2). `update/summary` can also *add* handwriting to a previously text-only
+digest (new `.mark` uploaded + promoted) and move an item between groups via
+`parentUniqueIdentifier` — both device-confirmed.
 
 ## 9. Storage paths and timing constants (SPC-side, FYI)
 

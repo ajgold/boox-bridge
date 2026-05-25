@@ -115,6 +115,36 @@ func TestAddIdempotentOnUniqueIdentifier(t *testing.T) {
 	}
 }
 
+func TestItemIdempotentOnMetadataUID(t *testing.T) {
+	// Real wire shape: items send empty top-level uniqueIdentifier; the stable
+	// identity is metadata.unique_identifier. A re-push must update, not duplicate.
+	h, _ := newSummaryHandler(t)
+	body := func(content, md5 string) string {
+		return fmt.Sprintf(`{"content":%q,"md5Hash":%q,"sourceType":2,"metadata":"{\"author\":\"Bob\",\"unique_identifier\":\"d10ab4ca\"}"}`, content, md5)
+	}
+
+	w := httptest.NewRecorder()
+	h.AddSummary(w, post(body("Write", "m1")))
+	first := decode[dto.AddSummaryVO](t, w)
+
+	w = httptest.NewRecorder()
+	h.AddSummary(w, post(body("Write-edited", "m2")))
+	second := decode[dto.AddSummaryVO](t, w)
+
+	if first.ID != second.ID {
+		t.Fatalf("item re-push must reuse row by metadata.unique_identifier: %d vs %d", first.ID, second.ID)
+	}
+	w = httptest.NewRecorder()
+	h.QuerySummary(w, post(`{"page":0,"size":0}`))
+	q := decode[dto.QuerySummaryVO](t, w)
+	if q.TotalRecords != 1 {
+		t.Fatalf("want 1 row after item re-push, got %d", q.TotalRecords)
+	}
+	if q.SummaryDOList[0].Content != "Write-edited" || q.SummaryDOList[0].UniqueIdentifier != "d10ab4ca" {
+		t.Errorf("item dedup/update wrong (uid should be lifted from metadata): %+v", q.SummaryDOList[0])
+	}
+}
+
 func TestUpdatePreservesUniqueIdentifier(t *testing.T) {
 	h, _ := newSummaryHandler(t)
 	w := httptest.NewRecorder()
@@ -275,6 +305,24 @@ func TestMarkBlobRoundTrip(t *testing.T) {
 	dl := decode[dto.DownloadSummaryVO](t, w)
 	if !dl.Success || !strings.Contains(dl.URL, "/api/oss/download") || !strings.Contains(dl.URL, "signature=") {
 		t.Fatalf("bad download VO: %+v", dl)
+	}
+}
+
+func TestParseMetadataMapPreservesNumbers(t *testing.T) {
+	// Device-confirmed: numeric metadata (e.g. source_size 18992668) must not be
+	// coerced through float64 into "1.8992668e+07".
+	m := parseMetadataMap(`{"source_size":18992668,"note_page":12,"author":"greg","unique_identifier":"u1"}`)
+	if m["source_size"] != "18992668" {
+		t.Errorf("source_size corrupted: %q", m["source_size"])
+	}
+	if m["note_page"] != "12" {
+		t.Errorf("note_page corrupted: %q", m["note_page"])
+	}
+	if m["author"] != "greg" || m["unique_identifier"] != "u1" {
+		t.Errorf("string fields wrong: %+v", m)
+	}
+	if parseMetadataMap("") != nil || parseMetadataMap("not json") != nil {
+		t.Error("empty/invalid metadata should yield nil")
 	}
 }
 
