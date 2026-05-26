@@ -26,6 +26,7 @@ const defaultOCRPrompt = "Transcribe all handwritten and printed text in this im
 // trivially fakeable in tests.
 type Indexer interface {
 	IndexPage(ctx context.Context, path string, pageIdx int, source, bodyText, titleText, keywords string) error
+	Delete(ctx context.Context, path string) error
 }
 type OCR interface {
 	Recognize(ctx context.Context, jpegData []byte, prompt string) (string, error)
@@ -122,12 +123,16 @@ func (b *Bridge) processPage(ctx context.Context, pagePK string) {
 		b.logger.Error("syncbridge: live-page lookup failed", "page", pagePK, "err", err)
 		return
 	}
+	path := "forestnote://" + notebookID + "/" + pagePK
+
 	if !live {
-		// Deleted/missing page. v1 leaves any stale index entry in place (the
-		// Indexer interface has no delete); index-on-delete is a follow-up.
+		// Deleted/missing page → drop any prior index entry so search stops
+		// returning it. (notebookID is still the deleted row's, so the path
+		// matches what was indexed; a missing page yields an empty notebook id
+		// and a harmless no-op delete.)
+		b.deleteIndex(ctx, pagePK, path)
 		return
 	}
-	path := "forestnote://" + notebookID + "/" + pagePK
 
 	strokes, err := b.store.LivePageStrokes(ctx, pagePK)
 	if err != nil {
@@ -135,7 +140,9 @@ func (b *Bridge) processPage(ctx context.Context, pagePK string) {
 		return
 	}
 	if len(strokes) == 0 {
-		return // nothing legible to render/index
+		// All strokes erased → the page is now blank; drop it from the index.
+		b.deleteIndex(ctx, pagePK, path)
+		return
 	}
 
 	img, err := forestrender.RenderPage(mapStrokes(strokes))
@@ -176,6 +183,18 @@ func (b *Bridge) processPage(ctx context.Context, pagePK string) {
 		} else if err := b.deps.EmbedStore.Save(ctx, path, 0, vec, b.deps.EmbedModel); err != nil {
 			b.logger.Warn("syncbridge: embed save failed", "page", pagePK, "err", err)
 		}
+	}
+}
+
+// deleteIndex drops a page's FTS index entry (best-effort). Embeddings are not
+// removed (the EmbedStore interface has no delete) — a noted follow-up; stale
+// embeddings affect only RAG recall, not keyword search.
+func (b *Bridge) deleteIndex(ctx context.Context, pagePK, path string) {
+	if b.deps.Indexer == nil {
+		return
+	}
+	if err := b.deps.Indexer.Delete(ctx, path); err != nil {
+		b.logger.Warn("syncbridge: index delete failed", "page", pagePK, "err", err)
 	}
 }
 

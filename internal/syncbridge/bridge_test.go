@@ -71,9 +71,10 @@ func seedPageWithStroke(t *testing.T, s *syncstore.Store) {
 type indexCall struct{ path, source, body string }
 
 type fakeIndexer struct {
-	mu     sync.Mutex
-	calls  []indexCall
-	notify chan string // optional: receives path on each call
+	mu      sync.Mutex
+	calls   []indexCall
+	deleted []string
+	notify  chan string // optional: receives path on each call
 }
 
 func (f *fakeIndexer) IndexPage(_ context.Context, path string, _ int, source, body, _, _ string) error {
@@ -85,7 +86,14 @@ func (f *fakeIndexer) IndexPage(_ context.Context, path string, _ int, source, b
 	}
 	return nil
 }
-func (f *fakeIndexer) count() int { f.mu.Lock(); defer f.mu.Unlock(); return len(f.calls) }
+func (f *fakeIndexer) Delete(_ context.Context, path string) error {
+	f.mu.Lock()
+	f.deleted = append(f.deleted, path)
+	f.mu.Unlock()
+	return nil
+}
+func (f *fakeIndexer) count() int    { f.mu.Lock(); defer f.mu.Unlock(); return len(f.calls) }
+func (f *fakeIndexer) delCount() int { f.mu.Lock(); defer f.mu.Unlock(); return len(f.deleted) }
 
 type fakeOCR struct{ text string }
 
@@ -149,6 +157,10 @@ func TestProcessPage_DeletedPageSkipped(t *testing.T) {
 	b.processPage(context.Background(), pg1)
 	if fi.count() != 0 {
 		t.Errorf("deleted page should not be indexed, got %d calls", fi.count())
+	}
+	want := "forestnote://" + nb1 + "/" + pg1
+	if fi.delCount() != 1 || fi.deleted[0] != want {
+		t.Errorf("deleted page should drop its index entry %q, got %v", want, fi.deleted)
 	}
 }
 
