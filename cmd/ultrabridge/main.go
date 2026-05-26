@@ -379,6 +379,7 @@ func main() {
 		// file rides the unmodified pipeline (catalog write-through included);
 		// OCRWatchDir scopes the kick to the Supernote NotesPath.
 		var spcEnqueuer spcserver.UploadEnqueuerFunc
+		var snFileRecords spcserver.FileMover
 		for _, s := range sources {
 			if snSrc, ok := s.(*supernote.Source); ok {
 				// Route through the pipeline's enqueue (UpsertFile → dedup →
@@ -387,13 +388,16 @@ func main() {
 				// yet for a freshly-uploaded file.
 				pl := snSrc.Pipeline()
 				spcEnqueuer = func(ctx context.Context, path string) error { return pl.Enqueue(ctx, path) }
+				// The same source's notestore backs the notes/jobs inventory for
+				// device files, so move_v3 can repoint those rows too.
+				snFileRecords = snSrc.NoteStore()
 			}
 		}
-		// Guard the typed-nil: a nil *rag.Store assigned to the Deindexer
+		// Guard the typed-nil: a nil *rag.Store assigned to the IndexStore
 		// interface field would be non-nil and panic when the handler calls it.
-		var spcEmbedDeleter spcserver.Deindexer
+		var spcEmbedIndex spcserver.IndexStore
 		if embedStore != nil {
-			spcEmbedDeleter = embedStore
+			spcEmbedIndex = embedStore
 		}
 		spcSrv = spcserver.New(spcserver.Config{
 			Mode:           cfg.SPCMode,
@@ -413,8 +417,9 @@ func main() {
 			OCRWatchDir:    snNotesPath,
 			DigestStore:    digestStore,
 			DigestIndexer:  digestIndexer,
-			ContentDeleter: si,
-			EmbedDeleter:   spcEmbedDeleter,
+			ContentIndex:   si,
+			EmbedIndex:     spcEmbedIndex,
+			FileRecords:    snFileRecords,
 			Logger:         logger,
 		})
 		taskNotifier = notify.NewSocketNotifier(

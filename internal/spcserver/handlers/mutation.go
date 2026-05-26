@@ -37,27 +37,40 @@ const (
 	errSameNameMsg       = "A file with the same name already exists"
 )
 
-// Deindexer removes a note path from a UB index (FTS content or RAG
-// embeddings). search.Store and *rag.Store both satisfy it. A delete drops the
-// recycled file's search/RAG entries so it stops surfacing in unified search.
-type Deindexer interface {
+// IndexStore mutates a note's entries in a UB index (FTS content or RAG
+// embeddings) to follow a file through delete/move/copy. search.Store and
+// *rag.Store both satisfy it. Delete drops a deleted file's entries; Rename
+// repoints a moved file's entries; Copy duplicates them for a copied file.
+type IndexStore interface {
 	Delete(ctx context.Context, path string) error
+	Rename(ctx context.Context, oldPath, newPath string) error
+	Copy(ctx context.Context, srcPath, dstPath string) error
+}
+
+// FileMover repoints a file's inventory/job rows (the notes→jobs FK pair) when
+// it moves, so the Files tab + job history track the new path. *notestore.Store
+// satisfies it.
+type FileMover interface {
+	RenameFile(ctx context.Context, oldPath, newPath string) error
 }
 
 // MutationHandler serves the SPC file-mutation write-path (Phase 4c): delete
 // (soft, to .recycle/), move, and copy. It shares the FileHandler's Root and
 // registry. Notifier (optional) fires a best-effort FILE-SYN after a change.
-// ContentDeleter/EmbedDeleter (optional) de-index a deleted file from the FTS
-// index and RAG embeddings; both nil ⇒ no de-index (a deleted note would keep
-// surfacing in search/chat).
+// ContentIndex/EmbedIndex (optional) keep the FTS index and RAG embeddings in
+// step with the filesystem on delete/move/copy; FileRecords (optional) does the
+// same for the notes/jobs inventory on move. All nil ⇒ the mutation still
+// happens on disk, the index just goes stale (a moved note would keep surfacing
+// at its old path, a copy would not be searchable).
 type MutationHandler struct {
-	Root           string
-	Reg            *fileids.Registry
-	Notifier       UploadNotifier
-	ContentDeleter Deindexer
-	EmbedDeleter   Deindexer
-	Now            func() time.Time
-	Logger         *slog.Logger
+	Root         string
+	Reg          *fileids.Registry
+	Notifier     UploadNotifier
+	ContentIndex IndexStore
+	EmbedIndex   IndexStore
+	FileRecords  FileMover
+	Now          func() time.Time
+	Logger       *slog.Logger
 }
 
 func (h *MutationHandler) log() *slog.Logger {
@@ -139,16 +152,55 @@ func (h *MutationHandler) DeleteFolder(w http.ResponseWriter, r *http.Request) {
 }
 
 // deindex drops the file's FTS content and RAG embeddings, best-effort: each
-// deleter is optional and a failure is logged, never propagated.
+// index is optional and a failure is logged, never propagated.
 func (h *MutationHandler) deindex(ctx context.Context, abs string) {
-	if h.ContentDeleter != nil {
-		if err := h.ContentDeleter.Delete(ctx, abs); err != nil {
+	if h.ContentIndex != nil {
+		if err := h.ContentIndex.Delete(ctx, abs); err != nil {
 			h.log().Error("delete_folder_v3 deindex content", "path", abs, "err", err)
 		}
 	}
-	if h.EmbedDeleter != nil {
-		if err := h.EmbedDeleter.Delete(ctx, abs); err != nil {
+	if h.EmbedIndex != nil {
+		if err := h.EmbedIndex.Delete(ctx, abs); err != nil {
 			h.log().Error("delete_folder_v3 deindex embeddings", "path", abs, "err", err)
+		}
+	}
+}
+
+// reindexMove repoints the file's FTS content, RAG embeddings, and notes/jobs
+// inventory from src to dst, best-effort. Content is unchanged by a move, so
+// repointing beats re-OCR; a failure is logged, never fails the device's move.
+func (h *MutationHandler) reindexMove(ctx context.Context, src, dst string) {
+	if h.ContentIndex != nil {
+		if err := h.ContentIndex.Rename(ctx, src, dst); err != nil {
+			h.log().Error("move_v3 reindex content", "src", src, "dst", dst, "err", err)
+		}
+	}
+	if h.EmbedIndex != nil {
+		if err := h.EmbedIndex.Rename(ctx, src, dst); err != nil {
+			h.log().Error("move_v3 reindex embeddings", "src", src, "dst", dst, "err", err)
+		}
+	}
+	if h.FileRecords != nil {
+		if err := h.FileRecords.RenameFile(ctx, src, dst); err != nil {
+			h.log().Error("move_v3 reindex file records", "src", src, "dst", dst, "err", err)
+		}
+	}
+}
+
+// reindexCopy duplicates the source's FTS content and RAG embeddings under dst
+// so the copy is immediately searchable, best-effort. Content is identical, so
+// duplicating beats re-OCR; a failure is logged, never fails the device's copy.
+// notes/jobs inventory for the copy is left to the next scan (a copy is a new,
+// independently-tracked file).
+func (h *MutationHandler) reindexCopy(ctx context.Context, src, dst string) {
+	if h.ContentIndex != nil {
+		if err := h.ContentIndex.Copy(ctx, src, dst); err != nil {
+			h.log().Error("copy_v3 reindex content", "src", src, "dst", dst, "err", err)
+		}
+	}
+	if h.EmbedIndex != nil {
+		if err := h.EmbedIndex.Copy(ctx, src, dst); err != nil {
+			h.log().Error("copy_v3 reindex embeddings", "src", src, "dst", dst, "err", err)
 		}
 	}
 }
@@ -203,6 +255,9 @@ func (h *MutationHandler) Move(w http.ResponseWriter, r *http.Request) {
 	if err := h.Reg.UpdatePath(r.Context(), id, dest); err != nil {
 		h.log().Error("move_v3 UpdatePath", "id", id, "dest", dest, "err", err)
 	}
+	// Repoint the search/RAG index + notes inventory so the moved note follows
+	// its file instead of going stale at the old path (best-effort).
+	h.reindexMove(r.Context(), src, dest)
 	h.respondEntry(w, r, dest, func(e *dto.EntriesVO) {
 		envelope.WriteJSON(w, dto.FileMoveLocalVO{BaseVO: envelope.OK(), EquipmentNo: req.EquipmentNo, EntriesVO: e})
 	}, func() { fail(errMoveMissingCode, errMoveMissingMsg) })
@@ -235,6 +290,9 @@ func (h *MutationHandler) Copy(w http.ResponseWriter, r *http.Request) {
 		fail(errCopyMissingCode, errCopyMissingMsg)
 		return
 	}
+	// Duplicate the search/RAG index entries so the copy is immediately
+	// searchable without re-OCR (best-effort).
+	h.reindexCopy(r.Context(), src, dest)
 	h.respondEntry(w, r, dest, func(e *dto.EntriesVO) {
 		envelope.WriteJSON(w, dto.FileCopyLocalVO{BaseVO: envelope.OK(), EquipmentNo: req.EquipmentNo, EntriesVO: e})
 	}, func() { fail(errCopyMissingCode, errCopyMissingMsg) })

@@ -223,6 +223,37 @@ func (s *Store) TransferJob(ctx context.Context, oldPath, newPath string) error 
 	return nil
 }
 
+// RenameFile repoints the notes row (PK) and its job (FK) from oldPath to
+// newPath, so a moved/renamed file keeps its inventory + job history instead of
+// orphaning them. note_content is owned by the search store (Rename there);
+// this method covers only the notes→jobs FK pair. The rel_path display column
+// is left as-is — the next scan reconciles it — since this method has no notes
+// root to recompute it from. A no-op (0 rows) when the file was never tracked.
+//
+// SQLite requires foreign_keys OFF to be toggled outside a transaction, so the
+// PK update doesn't trip the jobs FK mid-rename (same pattern as
+// booxpipeline.Store.UpdateNotePath).
+func (s *Store) RenameFile(ctx context.Context, oldPath, newPath string) error {
+	if _, err := s.db.ExecContext(ctx, `PRAGMA foreign_keys = OFF`); err != nil {
+		return fmt.Errorf("disable fk: %w", err)
+	}
+	defer s.db.ExecContext(ctx, `PRAGMA foreign_keys = ON`)
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin tx: %w", err)
+	}
+	defer tx.Rollback()
+
+	if _, err := tx.ExecContext(ctx, `UPDATE notes SET path=? WHERE path=?`, newPath, oldPath); err != nil {
+		return fmt.Errorf("rename notes %s → %s: %w", oldPath, newPath, err)
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE jobs SET note_path=? WHERE note_path=?`, newPath, oldPath); err != nil {
+		return fmt.Errorf("rename jobs %s → %s: %w", oldPath, newPath, err)
+	}
+	return tx.Commit()
+}
+
 func scanRow(row *sql.Row) (*NoteFile, error) {
 	var path2, relPath, fileType, jobStatus string
 	var sizeBytes, mtimeUnix, ctimeUnix int64

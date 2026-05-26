@@ -559,3 +559,48 @@ func TestTransferJob_NoJob(t *testing.T) {
 		t.Error("expected error when no job exists for old path")
 	}
 }
+
+// RenameFile repoints the notes row PK and its job FK together without tripping
+// the foreign key, and is a no-op for an untracked path.
+func TestRenameFile(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+	now := time.Now().Unix()
+
+	if _, err := s.db.ExecContext(ctx, `
+		INSERT INTO notes (path, rel_path, file_type, size_bytes, mtime, created_at, updated_at)
+		VALUES (?, 'old.note', 'note', 0, ?, ?, ?)`, "/old.note", now, now, now); err != nil {
+		t.Fatalf("seed notes: %v", err)
+	}
+	if _, err := s.db.ExecContext(ctx, `
+		INSERT INTO jobs (note_path, status, queued_at, finished_at)
+		VALUES (?, 'done', ?, ?)`, "/old.note", now, now); err != nil {
+		t.Fatalf("seed job: %v", err)
+	}
+
+	if err := s.RenameFile(ctx, "/old.note", "/new.note"); err != nil {
+		t.Fatalf("RenameFile: %v", err)
+	}
+
+	var notesOld, notesNew, jobsOld, jobsNew int
+	s.db.QueryRowContext(ctx, "SELECT COUNT(*) FROM notes WHERE path=?", "/old.note").Scan(&notesOld)
+	s.db.QueryRowContext(ctx, "SELECT COUNT(*) FROM notes WHERE path=?", "/new.note").Scan(&notesNew)
+	s.db.QueryRowContext(ctx, "SELECT COUNT(*) FROM jobs WHERE note_path=?", "/old.note").Scan(&jobsOld)
+	s.db.QueryRowContext(ctx, "SELECT COUNT(*) FROM jobs WHERE note_path=?", "/new.note").Scan(&jobsNew)
+	if notesOld != 0 || notesNew != 1 || jobsOld != 0 || jobsNew != 1 {
+		t.Fatalf("after rename: notesOld=%d notesNew=%d jobsOld=%d jobsNew=%d, want 0/1/0/1",
+			notesOld, notesNew, jobsOld, jobsNew)
+	}
+
+	// FK enforcement is restored after the rename.
+	var fk int
+	s.db.QueryRowContext(ctx, "PRAGMA foreign_keys").Scan(&fk)
+	if fk != 1 {
+		t.Errorf("foreign_keys = %d after RenameFile, want 1 (restored)", fk)
+	}
+
+	// Untracked path is a no-op, not an error.
+	if err := s.RenameFile(ctx, "/never.note", "/wherever.note"); err != nil {
+		t.Errorf("rename of untracked path should be a no-op, got %v", err)
+	}
+}
