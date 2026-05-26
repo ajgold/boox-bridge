@@ -41,6 +41,43 @@ func TestSearch_IndexAndQuery(t *testing.T) {
 	}
 }
 
+// Rename repoints FTS entries to the new path; the old path stops matching and
+// the new path matches.
+func TestSearch_Rename(t *testing.T) {
+	idx := openTestIndex(t)
+	ctx := context.Background()
+	if err := idx.Index(ctx, NoteDocument{Path: "/old.note", Page: 0, BodyText: "kumquat marmalade"}); err != nil {
+		t.Fatalf("Index: %v", err)
+	}
+	if err := idx.Rename(ctx, "/old.note", "/new.note"); err != nil {
+		t.Fatalf("Rename: %v", err)
+	}
+	res, _ := idx.Search(ctx, SearchQuery{Text: "kumquat"})
+	if len(res) != 1 || res[0].Path != "/new.note" {
+		t.Fatalf("after rename, results = %v, want one hit at /new.note", res)
+	}
+}
+
+// Copy duplicates index entries so both src and dst are searchable.
+func TestSearch_Copy(t *testing.T) {
+	idx := openTestIndex(t)
+	ctx := context.Background()
+	if err := idx.Index(ctx, NoteDocument{Path: "/src.note", Page: 0, BodyText: "rhubarb compote"}); err != nil {
+		t.Fatalf("Index: %v", err)
+	}
+	if err := idx.Copy(ctx, "/src.note", "/dst.note"); err != nil {
+		t.Fatalf("Copy: %v", err)
+	}
+	res, _ := idx.Search(ctx, SearchQuery{Text: "rhubarb"})
+	paths := map[string]bool{}
+	for _, r := range res {
+		paths[r.Path] = true
+	}
+	if !paths["/src.note"] || !paths["/dst.note"] {
+		t.Fatalf("after copy, want both /src.note and /dst.note searchable, got %v", paths)
+	}
+}
+
 // AC6.3: Results ordered by relevance
 func TestSearch_Ordering(t *testing.T) {
 	idx := openTestIndex(t)

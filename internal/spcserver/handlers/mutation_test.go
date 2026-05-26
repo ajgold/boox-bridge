@@ -72,15 +72,36 @@ func TestDeleteFolderSoftDeletes(t *testing.T) {
 	}
 }
 
-// recordingDeindexer records the paths passed to Delete and optionally returns
-// an error, to verify the delete handler drives de-index seams best-effort.
-type recordingDeindexer struct {
-	paths []string
-	err   error
+// recordingIndex records the calls made to each IndexStore method and optionally
+// returns an error, to verify the handler drives the index seams best-effort.
+type recordingIndex struct {
+	deleted []string
+	renamed [][2]string
+	copied  [][2]string
+	err     error
 }
 
-func (r *recordingDeindexer) Delete(_ context.Context, path string) error {
-	r.paths = append(r.paths, path)
+func (r *recordingIndex) Delete(_ context.Context, path string) error {
+	r.deleted = append(r.deleted, path)
+	return r.err
+}
+func (r *recordingIndex) Rename(_ context.Context, oldPath, newPath string) error {
+	r.renamed = append(r.renamed, [2]string{oldPath, newPath})
+	return r.err
+}
+func (r *recordingIndex) Copy(_ context.Context, srcPath, dstPath string) error {
+	r.copied = append(r.copied, [2]string{srcPath, dstPath})
+	return r.err
+}
+
+// recordingFileMover records RenameFile calls.
+type recordingFileMover struct {
+	renamed [][2]string
+	err     error
+}
+
+func (r *recordingFileMover) RenameFile(_ context.Context, oldPath, newPath string) error {
+	r.renamed = append(r.renamed, [2]string{oldPath, newPath})
 	return r.err
 }
 
@@ -90,10 +111,10 @@ func TestDeleteFolderDeindexes(t *testing.T) {
 	root := t.TempDir()
 	abs := writeFile(t, root, "Note/indexed.note", []byte("searchable"))
 	h, reg := newMutationHandler(t, root)
-	content := &recordingDeindexer{}
-	embed := &recordingDeindexer{}
-	h.ContentDeleter = content
-	h.EmbedDeleter = embed
+	content := &recordingIndex{}
+	embed := &recordingIndex{}
+	h.ContentIndex = content
+	h.EmbedIndex = embed
 	id, err := reg.IDFor(context.Background(), abs)
 	if err != nil {
 		t.Fatal(err)
@@ -103,11 +124,11 @@ func TestDeleteFolderDeindexes(t *testing.T) {
 	if out["success"] != true {
 		t.Fatalf("success = %v (%v)", out["success"], out)
 	}
-	if len(content.paths) != 1 || content.paths[0] != abs {
-		t.Fatalf("content deleter paths = %v, want [%q]", content.paths, abs)
+	if len(content.deleted) != 1 || content.deleted[0] != abs {
+		t.Fatalf("content deleted = %v, want [%q]", content.deleted, abs)
 	}
-	if len(embed.paths) != 1 || embed.paths[0] != abs {
-		t.Fatalf("embed deleter paths = %v, want [%q]", embed.paths, abs)
+	if len(embed.deleted) != 1 || embed.deleted[0] != abs {
+		t.Fatalf("embed deleted = %v, want [%q]", embed.deleted, abs)
 	}
 }
 
@@ -117,8 +138,8 @@ func TestDeleteFolderDeindexErrorIsBestEffort(t *testing.T) {
 	root := t.TempDir()
 	abs := writeFile(t, root, "Note/indexed.note", []byte("searchable"))
 	h, reg := newMutationHandler(t, root)
-	h.ContentDeleter = &recordingDeindexer{err: errDeindexBoom}
-	h.EmbedDeleter = &recordingDeindexer{err: errDeindexBoom}
+	h.ContentIndex = &recordingIndex{err: errDeindexBoom}
+	h.EmbedIndex = &recordingIndex{err: errDeindexBoom}
 	id, _ := reg.IDFor(context.Background(), abs)
 
 	out := decodeMap(t, h.DeleteFolder, `{"equipmentNo":"SN078","id":"`+strconv.FormatInt(id, 10)+`"}`)
@@ -128,6 +149,89 @@ func TestDeleteFolderDeindexErrorIsBestEffort(t *testing.T) {
 }
 
 var errDeindexBoom = fmt.Errorf("boom")
+
+// move_v3 repoints the search/RAG index + notes inventory from the old path to
+// the new path (it does not delete or copy).
+func TestMoveReindexes(t *testing.T) {
+	root := t.TempDir()
+	src := writeFile(t, root, "Note/m.note", []byte("move me"))
+	if err := os.MkdirAll(filepath.Join(root, "Document"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	h, reg := newMutationHandler(t, root)
+	content := &recordingIndex{}
+	embed := &recordingIndex{}
+	files := &recordingFileMover{}
+	h.ContentIndex, h.EmbedIndex, h.FileRecords = content, embed, files
+	id, _ := reg.IDFor(context.Background(), src)
+	dst := filepath.Join(root, "Document", "m.note")
+
+	out := decodeMap(t, h.Move,
+		`{"equipmentNo":"SN078","id":"`+strconv.FormatInt(id, 10)+`","to_path":"/Document/m.note"}`)
+	if out["success"] != true {
+		t.Fatalf("move success = %v (%v)", out["success"], out)
+	}
+	want := [2]string{src, dst}
+	for name, got := range map[string][][2]string{"content": content.renamed, "embed": embed.renamed, "files": files.renamed} {
+		if len(got) != 1 || got[0] != want {
+			t.Fatalf("%s renamed = %v, want [[%q %q]]", name, got, src, dst)
+		}
+	}
+	if len(content.deleted) != 0 || len(content.copied) != 0 {
+		t.Fatalf("move must not delete/copy the index: deleted=%v copied=%v", content.deleted, content.copied)
+	}
+}
+
+// copy_v3 duplicates the source's index entries to the destination so the copy
+// is searchable (it does not rename or delete).
+func TestCopyReindexes(t *testing.T) {
+	root := t.TempDir()
+	src := writeFile(t, root, "Note/c.note", []byte("copy me"))
+	if err := os.MkdirAll(filepath.Join(root, "Document"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	h, reg := newMutationHandler(t, root)
+	content := &recordingIndex{}
+	embed := &recordingIndex{}
+	h.ContentIndex, h.EmbedIndex = content, embed
+	id, _ := reg.IDFor(context.Background(), src)
+	dst := filepath.Join(root, "Document", "c.note")
+
+	out := decodeMap(t, h.Copy,
+		`{"equipmentNo":"SN078","id":"`+strconv.FormatInt(id, 10)+`","to_path":"/Document/c.note"}`)
+	if out["success"] != true {
+		t.Fatalf("copy success = %v (%v)", out["success"], out)
+	}
+	want := [2]string{src, dst}
+	if len(content.copied) != 1 || content.copied[0] != want {
+		t.Fatalf("content copied = %v, want [[%q %q]]", content.copied, src, dst)
+	}
+	if len(embed.copied) != 1 || embed.copied[0] != want {
+		t.Fatalf("embed copied = %v, want [[%q %q]]", embed.copied, src, dst)
+	}
+	if len(content.renamed) != 0 || len(content.deleted) != 0 {
+		t.Fatalf("copy must not rename/delete: renamed=%v deleted=%v", content.renamed, content.deleted)
+	}
+}
+
+// De-index failures on move/copy are best-effort: the device still gets success.
+func TestMoveCopyReindexBestEffort(t *testing.T) {
+	root := t.TempDir()
+	src := writeFile(t, root, "Note/x.note", []byte("x"))
+	if err := os.MkdirAll(filepath.Join(root, "Document"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	h, reg := newMutationHandler(t, root)
+	h.ContentIndex = &recordingIndex{err: errDeindexBoom}
+	h.EmbedIndex = &recordingIndex{err: errDeindexBoom}
+	h.FileRecords = &recordingFileMover{err: errDeindexBoom}
+	id, _ := reg.IDFor(context.Background(), src)
+	out := decodeMap(t, h.Move,
+		`{"equipmentNo":"SN078","id":"`+strconv.FormatInt(id, 10)+`","to_path":"/Document/x.note"}`)
+	if out["success"] != true {
+		t.Fatalf("reindex failure must not fail the move; got %v", out)
+	}
+}
 
 // AC4.1: an unknown id → success:false with E0318, never a 500.
 func TestDeleteFolderUnknownID(t *testing.T) {

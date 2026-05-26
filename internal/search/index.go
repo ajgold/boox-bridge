@@ -148,6 +148,36 @@ func (s *Store) Delete(ctx context.Context, path string) error {
 	return err
 }
 
+// Rename repoints every indexed page from oldPath to newPath. Used when a note
+// is moved/renamed so its FTS entries follow the file instead of going stale.
+// The note_content_au trigger keeps note_fts in sync on UPDATE.
+func (s *Store) Rename(ctx context.Context, oldPath, newPath string) error {
+	_, err := s.db.ExecContext(ctx,
+		"UPDATE note_content SET note_path=? WHERE note_path=?", newPath, oldPath)
+	return err
+}
+
+// Copy duplicates every indexed page of srcPath under dstPath. Used when a note
+// is copied so the copy is independently searchable (content is identical, so
+// no re-OCR is needed). dst is cleared first so the copy is idempotent.
+func (s *Store) Copy(ctx context.Context, srcPath, dstPath string) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err := tx.ExecContext(ctx, "DELETE FROM note_content WHERE note_path=?", dstPath); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `
+		INSERT INTO note_content (note_path, page, title_text, body_text, keywords, source, model, indexed_at)
+		SELECT ?, page, title_text, body_text, keywords, source, model, indexed_at
+		FROM note_content WHERE note_path=?`, dstPath, srcPath); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
 func (s *Store) GetContent(ctx context.Context, path string) ([]NoteDocument, error) {
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT note_path, page, COALESCE(title_text,''), COALESCE(body_text,''),

@@ -170,6 +170,78 @@ func TestStore_Delete(t *testing.T) {
 	}
 }
 
+func TestStore_Rename(t *testing.T) {
+	db := openTestDB(t)
+	defer db.Close()
+	store := NewStore(db, slog.Default())
+	ctx := context.Background()
+	if err := store.Save(ctx, "old.note", 0, 0, []float32{0.1, 0.2}, "m"); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	if err := store.Save(ctx, "old.note", 1, 0, []float32{0.3, 0.4}, "m"); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	if err := store.Rename(ctx, "old.note", "new.note"); err != nil {
+		t.Fatalf("Rename: %v", err)
+	}
+	// Cache repointed, no old path remains.
+	for _, rec := range store.AllEmbeddings() {
+		if rec.NotePath == "old.note" {
+			t.Fatalf("cache still has old.note after rename")
+		}
+	}
+	// DB repointed (fresh reload).
+	fresh := NewStore(db, slog.Default())
+	_, _ = fresh.LoadAll(ctx)
+	var nNew, nOld int
+	for _, rec := range fresh.AllEmbeddings() {
+		switch rec.NotePath {
+		case "new.note":
+			nNew++
+		case "old.note":
+			nOld++
+		}
+	}
+	if nNew != 2 || nOld != 0 {
+		t.Fatalf("after rename DB has new=%d old=%d, want new=2 old=0", nNew, nOld)
+	}
+}
+
+func TestStore_Copy(t *testing.T) {
+	db := openTestDB(t)
+	defer db.Close()
+	store := NewStore(db, slog.Default())
+	ctx := context.Background()
+	if err := store.Save(ctx, "src.note", 0, 0, []float32{0.1, 0.2}, "m"); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	if err := store.Save(ctx, "src.note", 0, 1, []float32{0.5, 0.6}, "m"); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	if err := store.Copy(ctx, "src.note", "dst.note"); err != nil {
+		t.Fatalf("Copy: %v", err)
+	}
+	count := func(recs []EmbeddingRecord, p string) int {
+		n := 0
+		for _, r := range recs {
+			if r.NotePath == p {
+				n++
+			}
+		}
+		return n
+	}
+	// Both present in cache.
+	if c := store.AllEmbeddings(); count(c, "src.note") != 2 || count(c, "dst.note") != 2 {
+		t.Fatalf("cache src=%d dst=%d, want 2/2", count(c, "src.note"), count(c, "dst.note"))
+	}
+	// Both present in DB (fresh reload).
+	fresh := NewStore(db, slog.Default())
+	_, _ = fresh.LoadAll(ctx)
+	if c := fresh.AllEmbeddings(); count(c, "src.note") != 2 || count(c, "dst.note") != 2 {
+		t.Fatalf("DB src=%d dst=%d, want 2/2", count(c, "src.note"), count(c, "dst.note"))
+	}
+}
+
 // TestStore_LoadAll verifies AC1.6:
 // LoadAll returns correct count and populates cache. AllEmbeddings() returns the loaded records.
 func TestStore_LoadAll(t *testing.T) {

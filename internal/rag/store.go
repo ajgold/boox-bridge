@@ -115,6 +115,68 @@ func (s *Store) Delete(ctx context.Context, notePath string) error {
 	return nil
 }
 
+// Rename repoints every chunk embedding from oldPath to newPath in both the DB
+// and the in-memory cache. Used when a note is moved/renamed so its vectors
+// follow the file instead of going stale (a moved note's content is unchanged,
+// so re-embedding would be pure waste).
+func (s *Store) Rename(ctx context.Context, oldPath, newPath string) error {
+	if _, err := s.db.ExecContext(ctx,
+		`UPDATE note_embeddings SET note_path=? WHERE note_path=?`, newPath, oldPath); err != nil {
+		return fmt.Errorf("rename embeddings: %w", err)
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for i := range s.cache {
+		if s.cache[i].NotePath == oldPath {
+			s.cache[i].NotePath = newPath
+		}
+	}
+	return nil
+}
+
+// Copy duplicates every chunk embedding of srcPath under dstPath in both the DB
+// and the cache. Used when a note is copied so the copy is independently
+// retrievable (content is identical, so no re-embedding is needed). dst is
+// cleared first so the copy is idempotent.
+func (s *Store) Copy(ctx context.Context, srcPath, dstPath string) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err := tx.ExecContext(ctx, `DELETE FROM note_embeddings WHERE note_path=?`, dstPath); err != nil {
+		return fmt.Errorf("copy embeddings (clear dst): %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `
+		INSERT INTO note_embeddings (note_path, page, chunk, embedding, model, created_at)
+		SELECT ?, page, chunk, embedding, model, created_at FROM note_embeddings WHERE note_path=?`,
+		dstPath, srcPath); err != nil {
+		return fmt.Errorf("copy embeddings (insert): %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	// Drop any stale dst entries, then append copies of src's vectors under dst.
+	kept := s.cache[:0]
+	for _, rec := range s.cache {
+		if rec.NotePath != dstPath {
+			kept = append(kept, rec)
+		}
+	}
+	s.cache = kept
+	var dup []EmbeddingRecord
+	for _, rec := range s.cache {
+		if rec.NotePath == srcPath {
+			cp := EmbeddingRecord{NotePath: dstPath, Page: rec.Page, Chunk: rec.Chunk, Embedding: rec.Embedding}
+			dup = append(dup, cp)
+		}
+	}
+	s.cache = append(s.cache, dup...)
+	return nil
+}
+
 // LoadAll reads all embeddings from the database into the in-memory cache.
 // Call this on startup.
 func (s *Store) LoadAll(ctx context.Context) (int, error) {
