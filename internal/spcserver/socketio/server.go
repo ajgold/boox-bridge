@@ -1,6 +1,7 @@
 package socketio
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"log/slog"
@@ -16,12 +17,27 @@ import (
 // (/socket.io/). It authenticates on the handshake token, completes the EIO
 // open + SIO connect exchange, answers keepalives, and registers the live
 // connection so the rest of UB can push to it. See docs/spc-protocol.md §3.
+// DigestQueue is the optional digest-tombstone seam. On each ratta_ping the
+// handler drains the user's pending DELETE_DIGEST frames (DrainDigest) and emits
+// them on the "digest" event; when the device replies 42["digest","Received"]
+// the handler clears the delivered rows (AckDigest). nil disables it.
+// *spcserver/notify.TombstoneQueue satisfies it.
+type DigestQueue interface {
+	DrainDigest(ctx context.Context, userID string) (payload string, ok bool)
+	AckDigest(ctx context.Context, userID string)
+}
+
 type Handler struct {
 	secret   string
 	reg      *Registry
 	logger   *slog.Logger
 	upgrader websocket.Upgrader
+	digest   DigestQueue
 }
+
+// SetDigestQueue wires the digest-tombstone delivery seam (SPC server mode with
+// a digest store; nil otherwise). Set before serving.
+func (h *Handler) SetDigestQueue(q DigestQueue) { h.digest = q }
 
 // NewHandler builds the websocket handler. permessage-deflate is intentionally
 // not negotiated (EnableCompression stays false) — see the 1c design note; the
@@ -108,10 +124,28 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		case KindConnect:
 			_ = c.write([]byte("40")) // echo Socket.IO connect
 		case KindEvent:
-			if event == "ratta_ping" {
+			switch {
+			case event == "ratta_ping":
 				rattas++
 				_ = c.write(EncodeEvent("ratta_ping", "Received"))
-			} else {
+				// Drain any pending digest tombstones to this device — the real
+				// SPC server delivers queued digest messages on the heartbeat.
+				if h.digest != nil {
+					if p, ok := h.digest.DrainDigest(r.Context(), userID); ok {
+						// Emit the payload as a STRING arg (the device gson-parses
+						// args[0]) — same convention as the to-do/ServerMessage
+						// nudges and the real server's sendEvent("digest", json).
+						if err := c.write(EncodeEvent("digest", p)); err == nil {
+							// The device sends no app-level ack for a digest push
+							// (hardware-confirmed: device→server is pure ratta_ping),
+							// so clear the delivered tombstones on our own successful
+							// emit rather than waiting for a "Received" that never
+							// comes (which would re-send every ping).
+							h.digest.AckDigest(r.Context(), userID)
+						}
+					}
+				}
+			default:
 				others++
 				h.logger.Debug("spc socket event ignored", "event", event, "userId", userID)
 			}

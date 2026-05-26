@@ -15,6 +15,7 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
+	"time"
 
 	gocaldav "github.com/emersion/go-webdav/caldav"
 	"golang.org/x/crypto/bcrypt"
@@ -40,6 +41,7 @@ import (
 	"github.com/sysop/ultrabridge/internal/source/supernote"
 	"github.com/sysop/ultrabridge/internal/spcserver"
 	spcauth "github.com/sysop/ultrabridge/internal/spcserver/auth"
+	"github.com/sysop/ultrabridge/internal/spcserver/digesttomb"
 	"github.com/sysop/ultrabridge/internal/spcserver/fileids"
 	"github.com/sysop/ultrabridge/internal/spcserver/notify"
 	"github.com/sysop/ultrabridge/internal/spcserver/staging"
@@ -330,12 +332,12 @@ func main() {
 		// endpoints fall back to the pre-Phase-D stubs and task sync still works.
 		var digestStore spcserver.DigestStore
 		var digestIndexer spcserver.DigestIndexer
+		var digestDeliverer spcserver.DigestDeliverer // drains durable tombstones on heartbeat
 		if err := digeststore.Migrate(context.Background(), noteDB); err != nil {
 			logger.Error("spc digest migration failed; digest sync disabled", "err", err)
 		} else {
 			ds := digeststore.New(noteDB)
 			digestStore = ds
-			digestSvc = service.NewDigestService(ds)
 
 			// Phase D2: surface synced digests in the shared FTS5/RAG index so they
 			// are searchable and feed chat retrieval. Embedding is wired only when
@@ -350,6 +352,34 @@ func main() {
 			bridge.Start(context.Background())
 			defer bridge.Stop()
 			digestIndexer = bridge
+
+			// The same bridge de-indexes a web-deleted digest (D2).
+			digestSvc = service.NewDigestService(ds, bridge)
+
+			// D2 tombstone: a web-initiated digest delete enqueues a durable
+			// tombstone; the socket handler drains it to the device on its next
+			// ratta_ping heartbeat (survives the device being offline) and clears
+			// it on the device's "Received" ack. Best-effort: a migration failure
+			// just disables propagation (the device re-asserts, as before).
+			if err := digesttomb.Migrate(context.Background(), noteDB); err != nil {
+				logger.Error("spc digest tombstone migration failed; web-delete won't propagate", "err", err)
+			} else {
+				tombStore := digesttomb.New(noteDB)
+				digestSvc.SetTombstoneQueue(tombStore)
+				digestDeliverer = notify.NewTombstoneQueue(tombStore, logger)
+				// TTL sweep: reclaim tombstones a never-returning device left
+				// behind (the ack path clears delivered ones; this bounds growth).
+				go func() {
+					const ttl = 30 * 24 * time.Hour
+					t := time.NewTicker(6 * time.Hour)
+					defer t.Stop()
+					for range t.C {
+						if _, err := tombStore.Sweep(context.Background(), time.Now().Add(-ttl).UnixMilli()); err != nil {
+							logger.Warn("digest tombstone sweep", "err", err)
+						}
+					}
+				}()
+			}
 
 			// Backfill: index digests that synced before D2 (best-effort, async).
 			if items, err := ds.ListAllItemsForIndex(context.Background()); err != nil {
@@ -417,10 +447,11 @@ func main() {
 			OCRWatchDir:    snNotesPath,
 			DigestStore:    digestStore,
 			DigestIndexer:  digestIndexer,
-			ContentIndex:   si,
-			EmbedIndex:     spcEmbedIndex,
-			FileRecords:    snFileRecords,
-			Logger:         logger,
+			ContentIndex:    si,
+			EmbedIndex:      spcEmbedIndex,
+			FileRecords:     snFileRecords,
+			DigestDeliverer: digestDeliverer,
+			Logger:          logger,
 		})
 		taskNotifier = notify.NewSocketNotifier(
 			spcSrv.SocketRegistry(),

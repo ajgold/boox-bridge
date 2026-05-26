@@ -236,6 +236,11 @@ type DigestGroupView struct {
 type DigestService interface {
 	ListDigests(ctx context.Context, group, tag string, page, perPage int) ([]DigestView, int, error)
 	ListGroups(ctx context.Context) ([]DigestGroupView, error)
+	// DeleteDigest soft-deletes a digest and propagates the delete to the device
+	// via a durable DELETE_DIGEST tombstone (D2).
+	DeleteDigest(ctx context.Context, id int64) error
+	// SetTombstoneQueue wires the durable device-tombstone seam (SPC server mode only).
+	SetTombstoneQueue(q DigestTombstoneQueue)
 }
 
 // ConfigService manages system configuration and sources.
