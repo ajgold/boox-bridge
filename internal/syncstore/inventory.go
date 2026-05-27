@@ -3,6 +3,7 @@ package syncstore
 import (
 	"context"
 	"database/sql"
+	"encoding/base64"
 	"fmt"
 	"time"
 )
@@ -212,67 +213,196 @@ func (s *Store) LiveNotebookPageIDs(ctx context.Context, notebookID string) ([]s
 	return out, rows.Err()
 }
 
-// SoftDeleteNotebook soft-deletes a notebook plus its live pages and those
-// pages' live strokes in one transaction, bumping lww_wall_ts to now so the
-// delete beats replays of OLDER device ops. It is NOT an authoritative tombstone:
-// because two-way push isn't built, the delete is never relayed, so a subsequent
-// NEWER device edit wins LWW and resurrects the notebook (the bridge re-indexes
-// it). lww_site_id is set to "ub-web" to document UB-local provenance.
+// SoftDeleteNotebook deletes a notebook plus its live pages and those pages'
+// live strokes by AUTHORING tombstone ops — full-row upserts with deleted_at set
+// to now — through the server-authoring path (Store.AuthorOps). Because the
+// tombstones are recorded in the changelog under UB's own site_id, the relay
+// carries them to the user's devices on their next pull: the delete is a real
+// two-way push, not just a UB-local mirror edit. LWW still arbitrates the outcome
+// (forestnote-sync-protocol.md §5): a UB delete reliably beats OLDER device ops,
+// but a device edit with a NEWER wall_ts wins and resurrects the row (conformance
+// vector ub-delete-then-device-edit). The notebook + its pages + their strokes
+// are all tombstoned so the content — not just the notebook header — leaves the
+// device.
 //
 // Returns the IDs of the pages that were live at delete time, so the caller can
-// de-index each forestnote://{nb}/{page} from search + embeddings.
+// de-index each forestnote://{nb}/{page} from search + embeddings. The reads that
+// build the tombstone set are not in AuthorOps's transaction, so a stroke a device
+// adds between read and author is not tombstoned (it re-deletes on the next user
+// action) — acceptable for a user-triggered delete on the single-writer notedb.
 func (s *Store) SoftDeleteNotebook(ctx context.Context, notebookID string) ([]string, error) {
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return nil, fmt.Errorf("begin: %w", err)
-	}
-	defer tx.Rollback()
-
 	now := time.Now().UnixMilli()
 
-	// Capture the pages that are live now (those become the de-index set).
-	prows, err := tx.QueryContext(ctx,
-		`SELECT id FROM fn_page WHERE notebook_id = ? AND deleted_at IS NULL`, notebookID)
+	// Notebook full row → tombstone op. A missing row means nothing to delete.
+	var nbName sql.NullString
+	var nbSort, nbCreated sql.NullInt64
+	var nbFolder sql.NullString
+	switch err := s.db.QueryRowContext(ctx,
+		`SELECT name, sort_order, created_at, folder_id FROM fn_notebook WHERE id = ?`, notebookID).
+		Scan(&nbName, &nbSort, &nbCreated, &nbFolder); err {
+	case nil:
+	case sql.ErrNoRows:
+		return nil, nil
+	default:
+		return nil, fmt.Errorf("read notebook: %w", err)
+	}
+	ops := []Op{{
+		Table: "notebook", PK: notebookID,
+		Cols: map[string]any{
+			"name":       nbName.String, // NOT NULL in practice; "" if ever null
+			"sort_order": wireNum(nbSort),
+			"created_at": wireNum(nbCreated),
+			"deleted_at": float64(now),
+			"folder_id":  wireNullStr(nbFolder),
+		},
+	}}
+
+	// Live pages → tombstones; collect their IDs for the caller's de-index set.
+	prows, err := s.db.QueryContext(ctx,
+		`SELECT id, notebook_id, sort_order, created_at, template, template_pitch_mm
+		   FROM fn_page WHERE notebook_id = ? AND deleted_at IS NULL`, notebookID)
 	if err != nil {
-		return nil, fmt.Errorf("collect live pages: %w", err)
+		return nil, fmt.Errorf("read live pages: %w", err)
 	}
 	var pageIDs []string
 	for prows.Next() {
 		var id string
-		if err := prows.Scan(&id); err != nil {
+		var pnb sql.NullString
+		var psort, pcreated, ppitch sql.NullInt64
+		var ptmpl sql.NullString
+		if err := prows.Scan(&id, &pnb, &psort, &pcreated, &ptmpl, &ppitch); err != nil {
 			prows.Close()
-			return nil, fmt.Errorf("scan page id: %w", err)
+			return nil, fmt.Errorf("scan page: %w", err)
 		}
 		pageIDs = append(pageIDs, id)
+		ops = append(ops, Op{
+			Table: "page", PK: id,
+			Cols: map[string]any{
+				"notebook_id":       pnb.String,
+				"sort_order":        wireNum(psort),
+				"created_at":        wireNum(pcreated),
+				"deleted_at":        float64(now),
+				"template":          wireNullStr(ptmpl),
+				"template_pitch_mm": wireNullNum(ppitch),
+			},
+		})
 	}
 	prows.Close()
 	if err := prows.Err(); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("iterate pages: %w", err)
 	}
 
-	// Strokes of the notebook's live pages, then the pages, then the notebook.
-	if _, err := tx.ExecContext(ctx,
-		`UPDATE fn_stroke SET deleted_at = ?, lww_wall_ts = ?, lww_site_id = 'ub-web'
+	// Live strokes of those live pages → tombstones (full row; points re-emitted).
+	srows, err := s.db.QueryContext(ctx,
+		`SELECT id, page_id, color, pen_width_min, pen_width_max, points, z, created_at
+		   FROM fn_stroke
 		  WHERE deleted_at IS NULL
 		    AND page_id IN (SELECT id FROM fn_page WHERE notebook_id = ? AND deleted_at IS NULL)`,
-		now, now, notebookID); err != nil {
-		return nil, fmt.Errorf("soft-delete strokes: %w", err)
+		notebookID)
+	if err != nil {
+		return nil, fmt.Errorf("read live strokes: %w", err)
 	}
-	if _, err := tx.ExecContext(ctx,
-		`UPDATE fn_page SET deleted_at = ?, lww_wall_ts = ?, lww_site_id = 'ub-web'
-		  WHERE notebook_id = ? AND deleted_at IS NULL`, now, now, notebookID); err != nil {
-		return nil, fmt.Errorf("soft-delete pages: %w", err)
+	for srows.Next() {
+		var id string
+		var spage sql.NullString
+		var scolor, swmin, swmax, sz, screated sql.NullInt64
+		var spts []byte
+		if err := srows.Scan(&id, &spage, &scolor, &swmin, &swmax, &spts, &sz, &screated); err != nil {
+			srows.Close()
+			return nil, fmt.Errorf("scan stroke: %w", err)
+		}
+		ops = append(ops, Op{
+			Table: "stroke", PK: id,
+			Cols: map[string]any{
+				"page_id":       spage.String,
+				"color":         wireNum(scolor),
+				"pen_width_min": wireNum(swmin),
+				"pen_width_max": wireNum(swmax),
+				"points":        base64.StdEncoding.EncodeToString(spts),
+				"z":             wireNum(sz),
+				"created_at":    wireNum(screated),
+				"deleted_at":    float64(now),
+			},
+		})
 	}
-	if _, err := tx.ExecContext(ctx,
-		`UPDATE fn_notebook SET deleted_at = ?, lww_wall_ts = ?, lww_site_id = 'ub-web'
-		  WHERE id = ? AND deleted_at IS NULL`, now, now, notebookID); err != nil {
-		return nil, fmt.Errorf("soft-delete notebook: %w", err)
+	srows.Close()
+	if err := srows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate strokes: %w", err)
 	}
 
-	if err := tx.Commit(); err != nil {
-		return nil, fmt.Errorf("commit: %w", err)
+	if _, err := s.AuthorOps(ctx, ops); err != nil {
+		return nil, fmt.Errorf("author notebook delete: %w", err)
 	}
 	return pageIDs, nil
+}
+
+// TextBoxRef identifies a live text box for discovery (e.g. by an MCP agent that
+// wants to edit one): its ULID, the page it lives on, and its current text.
+type TextBoxRef struct {
+	ID     string
+	PageID string
+	Text   string
+	Z      int64
+}
+
+// ListNotebookTextBoxes returns every live text box on a notebook's live pages,
+// ordered by page then z. Backs text-box discovery before an edit.
+func (s *Store) ListNotebookTextBoxes(ctx context.Context, notebookID string) ([]TextBoxRef, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT t.id, t.page_id, COALESCE(t.text, ''), COALESCE(t.z, 0)
+		   FROM fn_text_box t
+		   JOIN fn_page p ON p.id = t.page_id
+		  WHERE p.notebook_id = ? AND p.deleted_at IS NULL AND t.deleted_at IS NULL
+		  ORDER BY p.sort_order, p.id, t.z, t.id`, notebookID)
+	if err != nil {
+		return nil, fmt.Errorf("list notebook text boxes: %w", err)
+	}
+	defer rows.Close()
+	var out []TextBoxRef
+	for rows.Next() {
+		var r TextBoxRef
+		if err := rows.Scan(&r.ID, &r.PageID, &r.Text, &r.Z); err != nil {
+			return nil, fmt.Errorf("scan text box ref: %w", err)
+		}
+		out = append(out, r)
+	}
+	return out, rows.Err()
+}
+
+// EditTextBoxText authors a server-side edit of one text box's text. It reads the
+// box's current full row and re-authors it as a text_box upsert with the new text
+// (every other column preserved) through AuthorOps — so the edit is recorded in
+// the changelog under UB's site_id and relayed to the user's devices on their next
+// pull, then resolved by the same LWW rule as a device edit. Returns the box's
+// page_id so the caller can re-render/re-index that page. Errors if the box is
+// missing or already deleted (a tombstoned box is not editable).
+func (s *Store) EditTextBoxText(ctx context.Context, boxID, newText string) (pageID string, err error) {
+	var pid, text, fontName string
+	var x, y, w, h, fontSize, color, weight, border, z, created int64
+	var del sql.NullInt64
+	switch e := s.db.QueryRowContext(ctx,
+		`SELECT page_id, x, y, width, height, text, font_name, font_size, color, weight, border_width, z, created_at, deleted_at
+		   FROM fn_text_box WHERE id = ?`, boxID).
+		Scan(&pid, &x, &y, &w, &h, &text, &fontName, &fontSize, &color, &weight, &border, &z, &created, &del); e {
+	case nil:
+	case sql.ErrNoRows:
+		return "", fmt.Errorf("text box not found: %s", boxID)
+	default:
+		return "", fmt.Errorf("read text box: %w", e)
+	}
+	if del.Valid {
+		return "", fmt.Errorf("text box is deleted: %s", boxID)
+	}
+	op := Op{Table: "text_box", PK: boxID, Cols: map[string]any{
+		"page_id": pid, "x": float64(x), "y": float64(y), "width": float64(w), "height": float64(h),
+		"text": newText, "font_name": fontName, "font_size": float64(fontSize), "color": float64(color),
+		"weight": float64(weight), "border_width": float64(border), "z": float64(z),
+		"created_at": float64(created), "deleted_at": nil,
+	}}
+	if _, err := s.AuthorOps(ctx, []Op{op}); err != nil {
+		return "", fmt.Errorf("author text box edit: %w", err)
+	}
+	return pid, nil
 }
 
 // NotebookPages returns a notebook's live pages in display order. The id tie-break

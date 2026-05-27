@@ -93,3 +93,66 @@ func (h *Handler) handleAPIGetImage(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", contentType)
 	io.Copy(w, stream)
 }
+
+// handleAPIForestNoteTextBoxes handles GET /api/forestnote/text-boxes?notebook=...
+// It lists a notebook's live text boxes (id, page, text) so an agent can pick one
+// to edit. Emits snake_case JSON to match the other note API endpoints.
+func (h *Handler) handleAPIForestNoteTextBoxes(w http.ResponseWriter, r *http.Request) {
+	if !h.notes.HasForestNoteSource() {
+		apiError(w, http.StatusNotFound, "no forestnote source")
+		return
+	}
+	notebookID := r.URL.Query().Get("notebook")
+	if notebookID == "" {
+		apiError(w, http.StatusBadRequest, "missing required parameter: notebook")
+		return
+	}
+	refs, err := h.notes.ListForestNoteTextBoxes(r.Context(), notebookID)
+	if err != nil {
+		h.logger.Error("api list text boxes failed", "notebook", notebookID, "err", err)
+		apiError(w, http.StatusInternalServerError, "failed to list text boxes")
+		return
+	}
+	type box struct {
+		ID     string `json:"id"`
+		PageID string `json:"page_id"`
+		Text   string `json:"text"`
+		Z      int64  `json:"z"`
+	}
+	out := make([]box, len(refs))
+	for i, r := range refs {
+		out[i] = box{ID: r.ID, PageID: r.PageID, Text: r.Text, Z: r.Z}
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(out)
+}
+
+// handleAPIForestNoteEditTextBox handles POST /api/forestnote/text-boxes/edit with
+// a JSON body {"id": "...", "text": "..."}. It authors a server-side edit of the
+// box's text (relayed to devices) and re-renders/re-indexes the affected page.
+func (h *Handler) handleAPIForestNoteEditTextBox(w http.ResponseWriter, r *http.Request) {
+	if !h.notes.HasForestNoteSource() {
+		apiError(w, http.StatusNotFound, "no forestnote source")
+		return
+	}
+	var body struct {
+		ID   string `json:"id"`
+		Text string `json:"text"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		apiError(w, http.StatusBadRequest, "invalid JSON body")
+		return
+	}
+	if body.ID == "" {
+		apiError(w, http.StatusBadRequest, "missing required field: id")
+		return
+	}
+	if err := h.notes.EditForestNoteTextBox(r.Context(), body.ID, body.Text); err != nil {
+		h.logger.Error("api edit text box failed", "id", body.ID, "err", err)
+		// A missing/deleted box is the client's fault; everything else is ours.
+		apiError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]bool{"ok": true})
+}

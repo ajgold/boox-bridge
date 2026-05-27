@@ -82,6 +82,8 @@ For tests, `LegacyNewHandler` in `handler_test.go` bridges the old 22-argument s
 | GET | `/api/search` | `handleAPISearch` | JSON: hybrid search results (requires retriever) |
 | GET | `/api/notes/pages` | `handleAPIGetPages` | JSON: indexed page content for a note (requires retriever) |
 | GET | `/api/notes/pages/image` | `handleAPIGetImage` | JPEG image for a note page (requires retriever) |
+| GET | `/api/forestnote/text-boxes` | `handleAPIForestNoteTextBoxes` | JSON: live text boxes (id/page_id/text/z) in a notebook (`?notebook=<id>`); 404 if no ForestNote source. Backs the `list_text_boxes` MCP tool. |
+| POST | `/api/forestnote/text-boxes/edit` | `handleAPIForestNoteEditTextBox` | Server-authored edit of a box's text (JSON body `{id,text}`); authors a relayable op + re-renders/re-indexes the page. Backs the `edit_text_box` MCP tool. |
 | POST | `/settings/mcp-tokens/create` | `handleMCPTokenCreate` | Create new MCP bearer token; redirect with one-time display (requires noteDB) |
 | POST | `/settings/mcp-tokens/revoke` | `handleMCPTokenRevoke` | Revoke MCP token by hash (requires noteDB) |
 

@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/sysop/ultrabridge/internal/booxpipeline"
+	"github.com/sysop/ultrabridge/internal/syncstore"
 )
 
 // TaskStatus is a type-safe status for tasks.
@@ -236,6 +237,11 @@ type NoteService interface {
 	DeleteForestNoteNotebook(ctx context.Context, notebookID string) error
 	// ReprocessForestNoteNotebook re-enqueues a notebook's pages for re-OCR/re-index.
 	ReprocessForestNoteNotebook(ctx context.Context, notebookID string) error
+	// ListForestNoteTextBoxes returns a notebook's live text boxes for discovery.
+	ListForestNoteTextBoxes(ctx context.Context, notebookID string) ([]syncstore.TextBoxRef, error)
+	// EditForestNoteTextBox authors a server-side text-box text edit (relayed to
+	// devices) and re-renders/re-indexes the affected page.
+	EditForestNoteTextBox(ctx context.Context, boxID, newText string) error
 	// ExportForestNoteNotebookPDF renders a notebook's live pages to a single PDF.
 	ExportForestNoteNotebookPDF(ctx context.Context, notebookID string) (stream io.ReadCloser, filename string, err error)
 

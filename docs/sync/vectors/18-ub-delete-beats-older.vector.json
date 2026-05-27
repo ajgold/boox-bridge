@@ -1,0 +1,53 @@
+{
+  "name": "ub-delete-beats-older",
+  "description": "Server-authored delete vs an OLDER device create. UB is now an authoring site (site_id 0000000000000000000000SRVR represents the server); its delete carries a newer wall_ts, so LWW makes the row deleted. Documents that a UB delete reliably beats device ops it has already seen.",
+  "ops": [
+    {
+      "table": "notebook",
+      "pk": "00000000000000000000000NB1",
+      "site_id": "0000000000000000000000000A",
+      "op_seq": 1,
+      "wall_ts": 1000,
+      "cols": {
+        "name": "Journal",
+        "sort_order": 0,
+        "created_at": 1000,
+        "deleted_at": null,
+        "folder_id": null
+      }
+    },
+    {
+      "table": "notebook",
+      "pk": "00000000000000000000000NB1",
+      "site_id": "0000000000000000000000SRVR",
+      "op_seq": 1,
+      "wall_ts": 2000,
+      "cols": {
+        "name": "Journal",
+        "sort_order": 0,
+        "created_at": 1000,
+        "deleted_at": 2000,
+        "folder_id": null
+      }
+    }
+  ],
+  "expected_state": {
+    "notebook": [
+      {
+        "pk": "00000000000000000000000NB1",
+        "site_id": "0000000000000000000000SRVR",
+        "op_seq": 1,
+        "wall_ts": 2000,
+        "cols": {
+          "name": "Journal",
+          "sort_order": 0,
+          "created_at": 1000,
+          "deleted_at": 2000,
+          "folder_id": null
+        }
+      }
+    ],
+    "page": [],
+    "stroke": []
+  }
+}

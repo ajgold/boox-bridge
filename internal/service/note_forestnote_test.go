@@ -18,6 +18,7 @@ type fakeFNReader struct {
 	notebooks   []syncstore.NotebookRow
 	pages       map[string][]syncstore.PageRef
 	strokes     map[string][]syncstore.StrokeData
+	textBoxes   map[string][]syncstore.TextBoxData
 	meta        map[string]syncstore.NotebookRow
 	live        map[string]bool                       // page id → live; absent ⇒ not live (missing/deleted)
 	contents    map[string]struct{ f []syncstore.FolderRow; n []syncstore.NotebookRow } // folderID → direct children
@@ -36,6 +37,9 @@ func (f *fakeFNReader) FolderPath(_ context.Context, id string) ([]syncstore.Fol
 func (f *fakeFNReader) SoftDeleteNotebook(_ context.Context, nb string) ([]string, error) {
 	f.deleted = append(f.deleted, nb)
 	return f.deletePages[nb], nil
+}
+func (f *fakeFNReader) ListNotebookTextBoxes(_ context.Context, nb string) ([]syncstore.TextBoxRef, error) {
+	return nil, nil
 }
 func (f *fakeFNReader) LiveNotebookPageIDs(_ context.Context, nb string) ([]string, error) {
 	var ids []string
@@ -90,6 +94,9 @@ func (f *fakeFNReader) LivePage(_ context.Context, pg string) (string, bool, err
 }
 func (f *fakeFNReader) LivePageStrokes(_ context.Context, pg string) ([]syncstore.StrokeData, error) {
 	return f.strokes[pg], nil
+}
+func (f *fakeFNReader) LivePageTextBoxes(_ context.Context, pg string) ([]syncstore.TextBoxData, error) {
+	return f.textBoxes[pg], nil
 }
 
 func twoPointStroke() syncstore.StrokeData {
@@ -181,6 +188,11 @@ type fakeReprocessor struct {
 
 func (f *fakeReprocessor) ReprocessNotebook(_ context.Context, nb string) error {
 	f.called = append(f.called, nb)
+	return f.err
+}
+
+func (f *fakeReprocessor) EditTextBox(_ context.Context, boxID, _ string) error {
+	f.called = append(f.called, "edit:"+boxID)
 	return f.err
 }
 

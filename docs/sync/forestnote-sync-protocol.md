@@ -17,14 +17,19 @@
 
 - **Client** — a ForestNote installation (Kotlin, on a Viwoods device). Authors all ops.
   Holds a local SQLite (SQLDelight) database and an outbound oplog.
-- **Server** — one UltraBridge instance (Go). A **relay + mirror**: it ingests client ops,
-  materializes a mirror, and relays ops to the user's other devices. **The server never
-  authors ForestNote ops.** All ops originate on a device; conflict is only device↔device.
+- **Server** — one UltraBridge instance (Go). A **relay + mirror** that is *also* an
+  authoring site: it ingests client ops, materializes a mirror, relays ops to the user's
+  other devices, **and can author its own ops** (e.g. a notebook delete initiated from the UB
+  web UI). UB holds a persistent ULID `site_id` of its own and a monotonic `op_seq` counter,
+  exactly like a device; server-authored ops travel the same wire and merge by the same LWW
+  rule, so conflict is device↔device **and** device↔UB. (Server-authored ops are recorded in
+  the changelog and pulled by every device via the normal relay; the wire is unchanged.)
 - **Single user per instance.** No tenant key, no row-level security — one UB instance
   serves one user's devices. (Multi-instance hosting is a deployment concern, out of scope.)
 
-The unit of replication is the **row**. Three tables sync: `notebook`, `page`, `stroke`.
-Merge is **row-level last-writer-wins (LWW)** under a deterministic total order (§5).
+The unit of replication is the **row**. Five tables sync: `folder`, `notebook`, `page`,
+`stroke`, and `text_box`. Merge is **row-level last-writer-wins (LWW)** under a deterministic
+total order (§5).
 
 ---
 
@@ -60,7 +65,7 @@ restoration sets it back to `null`. Both are ordinary upserts resolved by the sa
 Op = {
   "table":   "notebook" | "page" | "stroke",
   "pk":      "<ULID>",       // the row's primary key
-  "site_id": "<ULID>",       // device that authored this op
+  "site_id": "<ULID>",       // the site that authored this op (a device, or UB itself)
   "op_seq":  <int64>,        // per-device monotonic counter
   "wall_ts": <int64 ms UTC>, // device wall clock at authoring time
   "cols":    { ...full row state, including deleted_at }
@@ -120,6 +125,27 @@ grouping* is a local UX concern that deliberately does not replicate.)
 | `created_at` | int64 ms UTC | |
 | `deleted_at` | int64 ms UTC \| null | erase = set; un-erase = clear |
 
+**`text_box`** (schema v2) — a z-ordered text element on a page. Geometry and `font_size` are
+in **virtual units** (page short axis = 10,000), so a box renders proportionally across device
+sizes; the full `text` is retained even when the box is sized too small to show it (render
+clips, data does not).
+| col | type | notes |
+|---|---|---|
+| `page_id` | string (ULID) | parent page pk |
+| `x` | int64 | left edge, virtual units |
+| `y` | int64 | top edge, virtual units |
+| `width` | int64 | virtual units |
+| `height` | int64 | virtual units (auto-grows downward on the client) |
+| `text` | string | the content — the searchable / server-mutable payload |
+| `font_name` | string | a tablet `/system/fonts` basename (e.g. `Roboto-Regular.ttf`); `""` = default |
+| `font_size` | int64 | virtual units |
+| `color` | int64 | packed ARGB, sent as **unsigned int64** (same convention as `stroke.color`) |
+| `weight` | int64 | 400 = normal, 700 = bold |
+| `border_width` | int64 | screen px; 0 = none, 2 = hairline |
+| `z` | int64 | paint band: 0 = below ink, 1 = above ink |
+| `created_at` | int64 ms UTC | |
+| `deleted_at` | int64 ms UTC \| null | `null` = live |
+
 ### 3.2 Unknown columns are ignored (forward-compat)
 
 When materializing, the server **drops** any key in `cols` not listed for that table. A v2
@@ -137,7 +163,7 @@ row and the merge therefore consider only the known column set. (Conformance vec
 // Request
 {
   "protocol_version": 1,
-  "schema_hash": "9b807dc88cd0465d171892bb17e65ad94190eda058594e207caad3368eb1f2fe",
+  "schema_hash": "bc1953e2b85e766a572329e7023b4582b768094b4d27e28a632e21bedb776874",
   "site_id": "<ULID>",
   "cursor": <int64>,     // last global seq this device has applied (0 = never synced)
   "ops": [ Op, ... ]     // pending local ops, in op_seq order
@@ -247,6 +273,11 @@ Consequences that fall out for free:
 - **Delete / restore:** `deleted_at` is just an LWW column; the latest writer decides
   live-vs-deleted. `delete-then-restore` and `restore-then-delete` converge to the op with
   the greatest key.
+- **Server-authored vs device:** a UB-authored op (e.g. a delete from the web UI) is just an
+  op with UB's `site_id`, so it competes by the same key. A UB delete reliably beats device
+  ops older than it (`ub-delete-beats-older`), but a device edit with a newer `wall_ts` wins
+  and resurrects the row (`ub-delete-then-device-edit`) — the deliberate last-writer-wins
+  ceiling, not special-cased.
 
 ### 5.3 Per-op processing (the apply algorithm)
 
@@ -279,24 +310,34 @@ For each incoming op, in order:
 `schema_hash` is the lowercase hex SHA-256 of a canonical schema string. The string is built
 deterministically (no implementation-order dependence):
 
-- Tables in fixed order: `folder`, `notebook`, `page`, `stroke`.
+- Tables in fixed order: `folder`, `notebook`, `page`, `stroke`, `text_box`.
 - Within each table, column names sorted **ascending ASCII** (alphabetical).
 - Format: `table:col,col,...` per table, tables joined by `;`, no spaces, no trailing newline.
 
-The v1 canonical string is:
+The **v2** canonical string (current — adds `text_box`) is:
 
 ```
-folder:created_at,deleted_at,name,parent_folder_id,sort_order;notebook:created_at,deleted_at,folder_id,name,sort_order;page:created_at,deleted_at,notebook_id,sort_order,template,template_pitch_mm;stroke:color,created_at,deleted_at,page_id,pen_width_max,pen_width_min,points,z
+folder:created_at,deleted_at,name,parent_folder_id,sort_order;notebook:created_at,deleted_at,folder_id,name,sort_order;page:created_at,deleted_at,notebook_id,sort_order,template,template_pitch_mm;stroke:color,created_at,deleted_at,page_id,pen_width_max,pen_width_min,points,z;text_box:border_width,color,created_at,deleted_at,font_name,font_size,height,page_id,text,weight,width,x,y,z
 ```
 
 ```
-schema_hash = sha256(utf8(canonical string))
-            = 9b807dc88cd0465d171892bb17e65ad94190eda058594e207caad3368eb1f2fe
+schema_hash (v2) = sha256(utf8(canonical string))
+                 = bc1953e2b85e766a572329e7023b4582b768094b4d27e28a632e21bedb776874
 ```
+
+The prior **v1** string (no `text_box`) hashed to
+`9b807dc88cd0465d171892bb17e65ad94190eda058594e207caad3368eb1f2fe`.
 
 The server rejects a request whose `schema_hash` it does not recognize (`409`, §7) so a
 client on an unknown schema cannot corrupt the mirror. (Only the column **set** is hashed —
 identity/envelope fields `pk`, `site_id`, `op_seq`, `wall_ts` are not part of it.)
+
+**Grace window (multi-hash).** The server accepts a *set* of known-good hashes, not a single
+value: during a schema rollout it admits both the new (v2) and the immediately prior (v1)
+hash, so a not-yet-updated client keeps syncing while the matching client release ships. A v1
+client never sends `text_box` ops, so admitting it cannot corrupt the v2 mirror. Once all
+clients have updated, the prior hash is retired from the accepted set. This generalizes to
+every future bump (add the new hash, keep the prior one for one release, then drop it).
 
 ---
 

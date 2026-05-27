@@ -16,6 +16,22 @@ type StrokeData struct {
 	Z           int64
 }
 
+// TextBoxData is a materialized text box's render-relevant columns (the bridge
+// maps this onto forestrender.TextBox; syncstore stays render-agnostic). Geometry
+// and FontSize are virtual units (page short axis = 10,000), the same space as
+// stroke points; Color is the unsigned ARGB int64 stored verbatim; Z is the paint
+// band (0 = below ink, 1 = above).
+type TextBoxData struct {
+	X, Y, Width, Height int64
+	Text                string
+	FontName            string
+	FontSize            int64
+	Color               int64
+	Weight              int64
+	BorderWidth         int64
+	Z                   int64
+}
+
 // LivePage reports a page's parent notebook and whether it is live (exists and
 // not soft-deleted). A missing or deleted page returns live=false — the bridge
 // then skips rendering it.
@@ -48,6 +64,29 @@ func (s *Store) LivePageStrokes(ctx context.Context, pagePK string) ([]StrokeDat
 		var d StrokeData
 		if err := rows.Scan(&d.Color, &d.PenWidthMin, &d.PenWidthMax, &d.Points, &d.Z); err != nil {
 			return nil, fmt.Errorf("scan stroke: %w", err)
+		}
+		out = append(out, d)
+	}
+	return out, rows.Err()
+}
+
+// LivePageTextBoxes returns a page's non-deleted text boxes in z order (band
+// 0 before 1, so a caller drawing in slice order paints below-ink boxes first).
+func (s *Store) LivePageTextBoxes(ctx context.Context, pagePK string) ([]TextBoxData, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT x, y, width, height, text, font_name, font_size, color, weight, border_width, z
+		   FROM fn_text_box WHERE page_id = ? AND deleted_at IS NULL ORDER BY z`, pagePK)
+	if err != nil {
+		return nil, fmt.Errorf("live text boxes: %w", err)
+	}
+	defer rows.Close()
+
+	var out []TextBoxData
+	for rows.Next() {
+		var d TextBoxData
+		if err := rows.Scan(&d.X, &d.Y, &d.Width, &d.Height, &d.Text, &d.FontName,
+			&d.FontSize, &d.Color, &d.Weight, &d.BorderWidth, &d.Z); err != nil {
+			return nil, fmt.Errorf("scan text box: %w", err)
 		}
 		out = append(out, d)
 	}

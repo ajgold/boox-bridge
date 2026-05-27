@@ -46,7 +46,7 @@ func TestDecodePoints(t *testing.T) {
 }
 
 func TestRenderPage_Empty(t *testing.T) {
-	img, err := RenderPage(nil)
+	img, err := RenderPage(nil, nil)
 	if err != nil {
 		t.Fatalf("err: %v", err)
 	}
@@ -56,7 +56,7 @@ func TestRenderPage_Empty(t *testing.T) {
 }
 
 func TestRenderPage_SinglePointSkipped(t *testing.T) {
-	img, err := RenderPage([]Stroke{{Color: 4278190080, PenWidthMin: 2, PenWidthMax: 6, Points: buildPoints([3]int32{5, 5, 100})}})
+	img, err := RenderPage([]Stroke{{Color: 4278190080, PenWidthMin: 2, PenWidthMax: 6, Points: buildPoints([3]int32{5, 5, 100})}}, nil)
 	if err != nil {
 		t.Fatalf("err: %v", err)
 	}
@@ -65,20 +65,42 @@ func TestRenderPage_SinglePointSkipped(t *testing.T) {
 	}
 }
 
+func TestRenderPage_DrawsTextBoxWithNoStrokes(t *testing.T) {
+	// A page with only a text box (no ink) must still render the box, not blank.
+	box := TextBox{
+		X: 0, Y: 0, Width: 4000, Height: 1000,
+		Text: "hello world", FontName: "Roboto-Regular.ttf", FontSize: 300,
+		Color: 4278190080, Weight: 400, BorderWidth: 2, Z: 1,
+	}
+	img, err := RenderPage(nil, []TextBox{box})
+	if err != nil {
+		t.Fatalf("err: %v", err)
+	}
+	if nonWhitePixels(img) == 0 {
+		t.Error("expected a visible text box (border + glyphs), got blank canvas")
+	}
+	// Canvas must contain the box extent (4000x1000) + 2*margin, scaled by
+	// renderScale — proving boxes drive the bounding box even with no strokes.
+	if img.Bounds().Dx() < int(4000*renderScale) || img.Bounds().Dy() < int(1000*renderScale) {
+		t.Errorf("canvas %dx%d too small to contain the box", img.Bounds().Dx(), img.Bounds().Dy())
+	}
+}
+
 func TestRenderPage_DrawsStroke(t *testing.T) {
 	stroke := Stroke{
 		Color: 4278190080, PenWidthMin: 2, PenWidthMax: 6,
 		Points: buildPoints([3]int32{10, 10, 2000}, [3]int32{60, 60, 2000}),
 	}
-	img, err := RenderPage([]Stroke{stroke})
+	img, err := RenderPage([]Stroke{stroke}, nil)
 	if err != nil {
 		t.Fatalf("err: %v", err)
 	}
 	if nonWhitePixels(img) == 0 {
 		t.Error("expected a visible stroke, got blank canvas")
 	}
-	// Canvas should be the stroke extent (50x50) plus 2*margin in each axis.
-	want := 50 + 2*margin
+	// Canvas is the stroke extent (50x50) plus 2*margin in each axis, then
+	// downscaled by renderScale.
+	want := int(float64(50+2*margin) * renderScale)
 	if img.Bounds().Dx() != want || img.Bounds().Dy() != want {
 		t.Errorf("canvas = %dx%d, want %dx%d", img.Bounds().Dx(), img.Bounds().Dy(), want, want)
 	}

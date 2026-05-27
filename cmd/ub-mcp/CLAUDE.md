@@ -7,15 +7,16 @@ Model Context Protocol server that exposes UltraBridge note search and retrieval
 as MCP tools for AI agents (Claude Desktop, Cursor, etc.).
 
 ## Contracts
-- **Exposes**: Ten MCP tools across two categories.
+- **Exposes**: Twelve MCP tools across three categories.
   - Notes: `search_notes` (hybrid search), `get_note_pages` (page content), `get_note_image` (JPEG rendering).
+  - ForestNote text boxes: `list_text_boxes` (discovery — boxes in a notebook with id/page/text), `edit_text_box` (server-authored edit of a box's text; relayed to devices on next sync, re-indexed; LWW so a newer device edit can override). Both require an active ForestNote source (404 otherwise).
   - Tasks: `list_tasks`, `get_task`, `create_task`, `update_task`, `complete_task`, `delete_task`, `purge_completed_tasks`. All task mutations propagate to configured CalDAV devices on the next sync cycle (UB-wins). Dates are RFC3339; `update_task.clear_due_at=true` removes an existing due date (wins over `due_at` when both are set).
   - Two transport modes: stdio (default) and HTTP SSE (`--http` flag).
 - **Guarantees**: All tools delegate to UltraBridge JSON API via HTTP, authenticating with a Bearer token (`UB_MCP_API_TOKEN`) when set, else Basic Auth. Image data returned as base64-encoded embedded images. Error responses use MCP error format.
 - **Expects**: Running UltraBridge instance with JSON API endpoints enabled (requires retriever). Environment variables for API connection.
 
 ## Dependencies
-- **Uses**: `github.com/modelcontextprotocol/go-sdk/mcp` (MCP server framework), UltraBridge JSON API (notes: `/api/search`, `/api/notes/pages`, `/api/notes/pages/image`; tasks: `/api/v1/tasks`, `/api/v1/tasks/{id}`, `/api/v1/tasks/{id}/complete`, `/api/v1/tasks/purge-completed`).
+- **Uses**: `github.com/modelcontextprotocol/go-sdk/mcp` (MCP server framework), UltraBridge JSON API (notes: `/api/search`, `/api/notes/pages`, `/api/notes/pages/image`; forestnote: `GET /api/forestnote/text-boxes?notebook=`, `POST /api/forestnote/text-boxes/edit`; tasks: `/api/v1/tasks`, `/api/v1/tasks/{id}`, `/api/v1/tasks/{id}/complete`, `/api/v1/tasks/purge-completed`).
 - **Used by**: AI agents via MCP protocol
 - **Boundary**: Separate binary. Imports `internal/mcpauth` and `internal/notedb` for direct bearer token validation against shared SQLite. All note data access still via HTTP API.
 

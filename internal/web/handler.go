@@ -313,6 +313,8 @@ func NewHandler(
 	})
 	h.mux.HandleFunc("GET /api/notes/pages", h.handleAPIGetPages)
 	h.mux.HandleFunc("GET /api/notes/pages/image", h.handleAPIGetImage)
+	h.mux.HandleFunc("GET /api/forestnote/text-boxes", h.handleAPIForestNoteTextBoxes)
+	h.mux.HandleFunc("POST /api/forestnote/text-boxes/edit", h.handleAPIForestNoteEditTextBox)
 
 	if h.noteDB != nil {
 		h.mux.HandleFunc("GET /api/config", h.handleGetConfig)

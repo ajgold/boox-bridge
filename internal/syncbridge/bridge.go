@@ -12,6 +12,7 @@ import (
 	"context"
 	"image/jpeg"
 	"log/slog"
+	"strings"
 	"sync"
 
 	"github.com/sysop/ultrabridge/internal/fnpath"
@@ -143,13 +144,18 @@ func (b *Bridge) processPage(ctx context.Context, pagePK string) {
 		b.logger.Error("syncbridge: stroke read failed", "page", pagePK, "err", err)
 		return
 	}
-	if len(strokes) == 0 {
-		// All strokes erased → the page is now blank; drop it.
+	boxes, err := b.store.LivePageTextBoxes(ctx, pagePK)
+	if err != nil {
+		b.logger.Error("syncbridge: text box read failed", "page", pagePK, "err", err)
+		return
+	}
+	if len(strokes) == 0 && len(boxes) == 0 {
+		// All strokes erased and no text boxes → the page is now blank; drop it.
 		b.dropPage(ctx, pagePK, path)
 		return
 	}
 
-	img, err := forestrender.RenderPage(MapStrokes(strokes))
+	img, err := forestrender.RenderPage(MapStrokes(strokes), MapTextBoxes(boxes))
 	if err != nil {
 		b.logger.Error("syncbridge: render failed", "page", pagePK, "err", err)
 		return
@@ -175,15 +181,40 @@ func (b *Bridge) processPage(ctx context.Context, pagePK string) {
 		}
 	}
 
+	// Text-box content is native UTF-8 — higher quality than OCR'ing the rendered
+	// glyphs — so append it to the indexed/embedded body. (The boxes are also drawn
+	// into the image, so OCR may pick them up too; the duplication is harmless for
+	// search ranking and is the accepted v1 trade-off.)
+	body := text
+	if bt := joinTextBoxes(boxes); bt != "" {
+		if body != "" {
+			body += "\n"
+		}
+		body += bt
+	}
+
 	if b.deps.Indexer != nil {
-		if err := b.deps.Indexer.IndexPage(ctx, path, 0, "forestnote", text, "", ""); err != nil {
+		if err := b.deps.Indexer.IndexPage(ctx, path, 0, "forestnote", body, "", ""); err != nil {
 			b.logger.Warn("syncbridge: index failed", "page", pagePK, "err", err)
 		}
 	}
 
-	if text != "" && b.deps.Embedder != nil && b.deps.EmbedStore != nil {
-		rag.EmbedAndStorePage(ctx, b.deps.Embedder, b.deps.EmbedStore, path, 0, text, b.deps.EmbedModel, b.logger)
+	if body != "" && b.deps.Embedder != nil && b.deps.EmbedStore != nil {
+		rag.EmbedAndStorePage(ctx, b.deps.Embedder, b.deps.EmbedStore, path, 0, body, b.deps.EmbedModel, b.logger)
 	}
+}
+
+// joinTextBoxes concatenates the non-empty text of a page's boxes, newline-joined,
+// for the search/embedding body. Order follows the z-sorted read (stable enough
+// for a search payload; exact reading order is not required).
+func joinTextBoxes(boxes []syncstore.TextBoxData) string {
+	var parts []string
+	for _, b := range boxes {
+		if b.Text != "" {
+			parts = append(parts, b.Text)
+		}
+	}
+	return strings.Join(parts, "\n")
 }
 
 // dropPage removes a page from the search index and the embedding store
@@ -210,6 +241,21 @@ func MapStrokes(sd []syncstore.StrokeData) []forestrender.Stroke {
 		out[i] = forestrender.Stroke{
 			Color: s.Color, PenWidthMin: s.PenWidthMin, PenWidthMax: s.PenWidthMax,
 			Points: s.Points, Z: s.Z,
+		}
+	}
+	return out
+}
+
+// MapTextBoxes maps stored mirror text boxes onto forestrender's input. Exported
+// for the same reason as MapStrokes: the note service's on-the-fly renderer reuses
+// this exact mapping so the two paths can't drift.
+func MapTextBoxes(td []syncstore.TextBoxData) []forestrender.TextBox {
+	out := make([]forestrender.TextBox, len(td))
+	for i, t := range td {
+		out[i] = forestrender.TextBox{
+			X: t.X, Y: t.Y, Width: t.Width, Height: t.Height,
+			Text: t.Text, FontName: t.FontName, FontSize: t.FontSize,
+			Color: t.Color, Weight: t.Weight, BorderWidth: t.BorderWidth, Z: t.Z,
 		}
 	}
 	return out

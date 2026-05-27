@@ -1,7 +1,12 @@
 # Dev note: ForestNote two-way push (UB as an authoring sync site)
 
-Status: **not built** — design/handoff note for a future session. Written 2026-05-27
-right after the ForestNote Files-tab parity work (PR #33) landed on `main`.
+Status: **delete-push BUILT 2026-05-27** (branch `feat/forestnote-server-authoring`) —
+unit-tested + conformance-vectored, hardware round-trip still owed. The server-authoring
+primitive (UB ULID `site_id` + monotonic `op_seq` + `AuthorOps`) and the first consumer
+(`SoftDeleteNotebook` now authors tombstones for the notebook + its pages + strokes) are on
+that branch; see `internal/syncstore/{op,schema,store,inventory}.go`, `author_test.go`, and
+vectors `18`/`19`. Generalizing to edits/renames and wiring server-authored text-box edits
+(text-box doc Part G) remain. Original design note below (still accurate for the why/how).
 
 ## Why this note exists
 
