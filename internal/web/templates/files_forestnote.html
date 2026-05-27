@@ -4,21 +4,40 @@
     <div class="card" style="border-color: var(--status-text-failed);">
         <p class="text-danger">{{.filesError}}</p>
     </div>
-  {{else if .fnNotebookID}}
-    {{/* Notebook viewer: page gallery, rendered on the fly. */}}
+  {{else if .fnDetail}}
+    {{/* Notebook detail: metadata header + actions + per-page image & OCR text. */}}
+    {{$d := .fnDetail}}
     <div class="toolbar">
-      <a href="/files/forestnote" hx-get="/files/forestnote" hx-target="#main-content" hx-push-url="true"
+      <a href="/files/forestnote{{if $d.FolderPath}}?folder={{end}}" hx-get="/files/forestnote" hx-target="#main-content" hx-push-url="true"
          class="btn-small">← Notebooks</a>
-      <span class="text-bold" style="margin-left: 0.5rem;">{{.fnNotebookName}}</span>
+      <span class="text-bold" style="margin-left: 0.5rem;">{{$d.Name}}</span>
       <div class="flex-spacer"></div>
-      <span class="text-small">{{len .fnPages}} pages</span>
+      <a class="btn-small" href="/files/forestnote/export?notebook={{$d.NotebookID}}">⬇ Download PDF</a>
+      <button type="button" class="btn-small"
+              hx-post="/files/forestnote/reprocess?notebook={{$d.NotebookID}}" hx-swap="none">↻ Re-OCR</button>
+      <button type="button" class="btn-small" style="background: var(--status-text-failed);"
+              hx-post="/files/forestnote/delete"
+              hx-vals='{"notebook": "{{$d.NotebookID}}"}'
+              hx-confirm="Delete “{{$d.Name}}” from UltraBridge? This removes it from your library and search index. If the notebook still exists on your device and you edit it again, it will reappear on the next sync — to delete permanently, delete it on the device."
+              hx-on:htmx:after-request="if(event.detail.successful){window.location='/files/forestnote';}">✗ Delete</button>
     </div>
-    {{if .fnPages}}
+
+    <div class="card">
+      <div class="fn-meta">
+        <span><span class="text-secondary">Folder:</span> {{if $d.FolderPath}}{{range $i, $n := $d.FolderPath}}{{if $i}} / {{end}}{{$n}}{{end}}{{else}}(unfiled){{end}}</span>
+        <span><span class="text-secondary">Pages:</span> {{$d.PageCount}}</span>
+        <span><span class="text-secondary">Created:</span> {{formatTimestamp $d.CreatedAt}}</span>
+        <span><span class="text-secondary">Modified:</span> {{formatTimestamp $d.ModifiedAt}}</span>
+      </div>
+    </div>
+
+    {{if $d.Pages}}
     <div class="fn-page-grid">
-      {{range .fnPages}}
+      {{range $d.Pages}}
       <figure class="fn-page">
         <img loading="lazy" src="/files/forestnote/render?path={{.Path}}" alt="Page {{add .Ordinal 1}}">
         <figcaption class="text-small text-secondary">Page {{add .Ordinal 1}}</figcaption>
+        <div class="fn-page-ocr text-small">{{if .BodyText}}{{.BodyText}}{{else}}<em class="text-secondary">No text recognized.</em>{{end}}</div>
       </figure>
       {{end}}
     </div>
@@ -26,33 +45,58 @@
     <div class="card"><p class="text-secondary">This notebook has no pages yet.</p></div>
     {{end}}
   {{else}}
-    {{/* Browse mode: folder tree + unfiled notebooks. */}}
-    {{if or .fnTree .fnUnfiled}}
-    <ul class="fn-tree fn-tree-root">
-      {{range .fnTree}}{{template "_fn_folder_node" .}}{{end}}
-      {{range .fnUnfiled}}
-      <li class="fn-notebook">
-        <a href="/files/forestnote?notebook={{.NotebookID}}"
-           hx-get="/files/forestnote?notebook={{.NotebookID}}" hx-target="#main-content" hx-push-url="true">
-          📓 {{.Name}}</a>
-        <span class="text-small text-secondary">{{.PageCount}} pages</span>
-      </li>
+    {{/* Browse mode: Supernote-style table of folders + notebooks. */}}
+    <div class="card">
+      <div class="breadcrumb">
+        <a href="/files/forestnote" hx-get="/files/forestnote" hx-target="#main-content" hx-push-url="true">Home</a><span class="sep">/</span>
+        {{range .fnCrumbs}}
+          <a href="/files/forestnote?folder={{.FolderID}}" hx-get="/files/forestnote?folder={{.FolderID}}" hx-target="#main-content" hx-push-url="true">{{.Name}}</a><span class="sep">/</span>
+        {{end}}
+      </div>
+      {{if .fnEntries}}
+      <div class="table-container">
+      <table class="task-table">
+        <thead>
+          <tr>
+            <th><a href="#" onclick="fnNav({sort:'name', order: '{{if and (eq $.filesSort "name") (eq $.filesOrder "asc")}}desc{{else}}asc{{end}}'}); return false;" style="color:inherit; text-decoration:none;">Name {{if eq $.filesSort "name"}}{{if eq $.filesOrder "asc"}}▴{{else}}▾{{end}}{{end}}</a></th>
+            <th>Type</th>
+            <th><a href="#" onclick="fnNav({sort:'pages', order: '{{if and (eq $.filesSort "pages") (eq $.filesOrder "desc")}}asc{{else}}desc{{end}}'}); return false;" style="color:inherit; text-decoration:none;">Pages {{if eq $.filesSort "pages"}}{{if eq $.filesOrder "asc"}}▴{{else}}▾{{end}}{{end}}</a></th>
+            <th><a href="#" onclick="fnNav({sort:'created', order: '{{if and (eq $.filesSort "created") (eq $.filesOrder "desc")}}asc{{else}}desc{{end}}'}); return false;" style="color:inherit; text-decoration:none;">Created {{if eq $.filesSort "created"}}{{if eq $.filesOrder "asc"}}▴{{else}}▾{{end}}{{end}}</a></th>
+            <th><a href="#" onclick="fnNav({sort:'modified', order: '{{if and (eq $.filesSort "modified") (eq $.filesOrder "desc")}}asc{{else}}desc{{end}}'}); return false;" style="color:inherit; text-decoration:none;">Modified {{if eq $.filesSort "modified"}}{{if eq $.filesOrder "asc"}}▴{{else}}▾{{end}}{{end}}</a></th>
+            <th>Status</th><th>Actions</th>
+          </tr>
+        </thead>
+        <tbody>
+          {{range .fnEntries}}
+          {{template "_fn_note_row" (makeFNRowCtx . $.fnFolderID)}}
+          {{end}}
+        </tbody>
+      </table>
+      </div>
+      {{else}}
+      <p class="text-secondary">No ForestNote notebooks synced yet.</p>
       {{end}}
-    </ul>
-    {{else}}
-    <div class="card"><p class="text-secondary">No ForestNote notebooks synced yet.</p></div>
-    {{end}}
+    </div>
   {{end}}
 </div>
 
+<script>
+  // fnNav re-navigates the ForestNote table preserving the current folder while
+  // overriding sort/order (mirrors filesNav for the Supernote tab).
+  function fnNav(overrides) {
+    var params = new URLSearchParams(window.location.search);
+    if (params.get('notebook')) params.delete('notebook');
+    for (var k in overrides) params.set(k, overrides[k]);
+    var url = '/files/forestnote' + (params.toString() ? '?' + params.toString() : '');
+    htmx.ajax('GET', url, {target:'#main-content', pushUrl:true});
+  }
+</script>
+
 <style>
-  .fn-tree { list-style: none; margin: 0; padding-left: 1.25rem; }
-  .fn-tree-root { padding-left: 0; }
-  .fn-folder-label { font-weight: 600; }
-  .fn-notebook { padding: 0.2rem 0; }
-  .fn-notebook a { margin-right: 0.5rem; }
+  .fn-meta { display: flex; flex-wrap: wrap; gap: 1.25rem; }
   .fn-page-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 1rem; margin-top: 1rem; }
   .fn-page { margin: 0; border: 1px solid var(--border-color, #ccc); border-radius: 4px; padding: 0.5rem; background: var(--card-bg, #fff); }
   .fn-page img { width: 100%; height: auto; display: block; background: #fff; }
   .fn-page figcaption { text-align: center; margin-top: 0.25rem; }
+  .fn-page-ocr { margin-top: 0.4rem; max-height: 8rem; overflow-y: auto; white-space: pre-wrap; word-break: break-word; }
 </style>

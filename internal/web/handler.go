@@ -45,6 +45,14 @@ type fileRowCtx struct {
 	RelPath string
 }
 
+// fnRowCtx is the data shape passed into the _fn_note_row fragment: one
+// ForestNote table entry plus the folder currently being browsed (so per-row
+// actions can emit a back= query string for the non-HX redirect).
+type fnRowCtx struct {
+	Entry    service.ForestNoteEntry
+	FolderID string
+}
+
 //go:embed static
 var staticFS embed.FS
 
@@ -149,6 +157,9 @@ func NewHandler(
 		},
 		"makeFileRowCtx": func(f service.NoteFile, relPath string) fileRowCtx {
 			return fileRowCtx{File: f, RelPath: relPath}
+		},
+		"makeFNRowCtx": func(e service.ForestNoteEntry, folderID string) fnRowCtx {
+			return fnRowCtx{Entry: e, FolderID: folderID}
 		},
 		"noteSource": func(path string) string {
 			if h.booxNotesPath != "" && strings.HasPrefix(path, h.booxNotesPath) { return "Boox" }
@@ -259,6 +270,9 @@ func NewHandler(
 	h.mux.HandleFunc("GET /files/boox", h.handleFilesBoox)
 	h.mux.HandleFunc("GET /files/forestnote", h.handleFilesForestNote)
 	h.mux.HandleFunc("GET /files/forestnote/render", h.handleForestNoteRender)
+	h.mux.HandleFunc("POST /files/forestnote/delete", h.handleForestNoteDelete)
+	h.mux.HandleFunc("POST /files/forestnote/reprocess", h.handleForestNoteReprocess)
+	h.mux.HandleFunc("GET /files/forestnote/export", h.handleForestNoteExport)
 	h.mux.HandleFunc("GET /digests", h.handleDigests)
 	h.mux.HandleFunc("DELETE /digests/{id}", h.handleDeleteDigest)
 	h.mux.HandleFunc("GET /search", h.handleSearch)
@@ -534,10 +548,13 @@ func (h *Handler) handleFilesBoox(w http.ResponseWriter, r *http.Request) {
 	h.renderTemplate(w, r, "files_boox", data)
 }
 
-// handleFilesForestNote renders the ForestNote Files tab: the folder tree of
-// synced notebooks, or — when ?notebook= is set — that notebook's page gallery.
-// ForestNote has no filesystem; the inventory is a live projection of the
-// syncstore mirror, and page images render on the fly (see handleForestNoteRender).
+// handleFilesForestNote renders the ForestNote Files tab. ForestNote has no
+// filesystem; the inventory is a live projection of the syncstore mirror, and
+// page images render on the fly (see handleForestNoteRender). Two modes:
+//   - ?notebook=<id> → the enriched detail view (page thumbnails + OCR text +
+//     metadata header + actions);
+//   - otherwise ?folder=<id> (default "") → a Supernote-style table of that
+//     folder's subfolders + notebooks, with a breadcrumb trail.
 func (h *Handler) handleFilesForestNote(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
 	defer cancel()
@@ -549,23 +566,83 @@ func (h *Handler) handleFilesForestNote(w http.ResponseWriter, r *http.Request) 
 	}
 
 	if nb := r.URL.Query().Get("notebook"); nb != "" {
-		name, pages, err := h.notes.ListForestNotePages(ctx, nb)
+		detail, err := h.notes.GetForestNoteNotebookDetail(ctx, nb)
 		if err != nil {
 			http.Error(w, "notebook not found", http.StatusNotFound)
 			return
 		}
-		data["fnNotebookID"], data["fnNotebookName"], data["fnPages"] = nb, name, pages
+		data["fnDetail"] = detail
 		h.renderTemplate(w, r, "files_forestnote", data)
 		return
 	}
 
-	roots, unfiled, err := h.notes.ListForestNoteTree(ctx)
+	folderID := r.URL.Query().Get("folder")
+	sortField, sortOrder := r.URL.Query().Get("sort"), r.URL.Query().Get("order")
+	crumbs, entries, err := h.notes.ListForestNoteFolder(ctx, folderID, sortField, sortOrder)
 	if err != nil {
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	}
-	data["fnTree"], data["fnUnfiled"] = roots, unfiled
+	data["fnEntries"], data["fnCrumbs"], data["fnFolderID"] = entries, crumbs, folderID
+	data["filesSort"], data["filesOrder"] = sortField, sortOrder
 	h.renderTemplate(w, r, "files_forestnote", data)
+}
+
+// handleForestNoteDelete soft-deletes a notebook (UB-local) and de-indexes its
+// pages. HX requests get an empty 200 (the row swaps out); others land back on
+// the folder the delete came from.
+func (h *Handler) handleForestNoteDelete(w http.ResponseWriter, r *http.Request) {
+	nb := r.FormValue("notebook")
+	if nb == "" {
+		http.Error(w, "missing notebook", http.StatusBadRequest)
+		return
+	}
+	if err := h.notes.DeleteForestNoteNotebook(r.Context(), nb); err != nil {
+		http.Error(w, "failed to delete notebook", http.StatusInternalServerError)
+		return
+	}
+	h.respondEmptyOrRedirect(w, r, forestNoteFolderURL(r.FormValue("back")))
+}
+
+// handleForestNoteReprocess re-enqueues a notebook's pages for re-OCR/re-index.
+// Fire-and-forget: the work runs async on the sync bridge.
+func (h *Handler) handleForestNoteReprocess(w http.ResponseWriter, r *http.Request) {
+	nb := r.FormValue("notebook")
+	if nb == "" {
+		http.Error(w, "missing notebook", http.StatusBadRequest)
+		return
+	}
+	if err := h.notes.ReprocessForestNoteNotebook(r.Context(), nb); err != nil {
+		http.Error(w, "failed to reprocess notebook", http.StatusInternalServerError)
+		return
+	}
+	h.respondEmptyOrRedirect(w, r, "/files/forestnote?notebook="+url.QueryEscape(nb))
+}
+
+// handleForestNoteExport streams a notebook's pages as a single PDF.
+func (h *Handler) handleForestNoteExport(w http.ResponseWriter, r *http.Request) {
+	nb := r.URL.Query().Get("notebook")
+	if nb == "" {
+		http.Error(w, "missing notebook", http.StatusBadRequest)
+		return
+	}
+	stream, filename, err := h.notes.ExportForestNoteNotebookPDF(r.Context(), nb)
+	if err != nil {
+		http.Error(w, "export failed", http.StatusInternalServerError)
+		return
+	}
+	defer stream.Close()
+	w.Header().Set("Content-Type", "application/pdf")
+	w.Header().Set("Content-Disposition", "attachment; filename=\""+filename+"\"")
+	io.Copy(w, stream)
+}
+
+// forestNoteFolderURL builds the folder-browse URL for a (possibly empty) folder.
+func forestNoteFolderURL(folderID string) string {
+	if folderID == "" {
+		return "/files/forestnote"
+	}
+	return "/files/forestnote?folder=" + url.QueryEscape(folderID)
 }
 
 // handleForestNoteRender streams a ForestNote page as JPEG, rendered on the fly

@@ -25,3 +25,16 @@ func Is(path string) bool { return strings.HasPrefix(path, Scheme) }
 // notebook-only URI (no page) it returns the notebook id; callers that render
 // pages always pass a full page URI.
 func PageID(path string) string { return path[strings.LastIndex(path, "/")+1:] }
+
+// NotebookID extracts the notebook-id segment from any forestnote:// URI
+// (notebook- or page-level). Returns "" if path is not a ForestNote URI.
+func NotebookID(path string) string {
+	if !Is(path) {
+		return ""
+	}
+	rest := strings.TrimPrefix(path, Scheme)
+	if i := strings.Index(rest, "/"); i >= 0 {
+		return rest[:i]
+	}
+	return rest
+}

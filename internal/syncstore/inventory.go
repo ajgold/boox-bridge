@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"time"
 )
 
 // inventory.go exposes the mirror as a browsable note inventory for the UI:
@@ -15,22 +16,49 @@ import (
 // page is addressed for rendering as forestnote://{notebook_id}/{page_id}.
 
 // FolderRow is one live folder. ParentFolderID is "" for a top-level folder.
+// CreatedAt is the synced fn_folder.created_at; ModifiedAt is the folder row's
+// own last-write wall clock (lww_wall_ts) — folders don't roll up child edits.
 type FolderRow struct {
 	ID             string
 	Name           string
 	ParentFolderID string
 	SortOrder      int64
+	CreatedAt      int64 // ms UTC, 0 = unset
+	ModifiedAt     int64 // ms UTC
 }
 
 // NotebookRow is one live notebook with its live page count. FolderID is "" when
-// the notebook is unfiled (sits at the root, not inside any folder).
+// the notebook is unfiled (sits at the root, not inside any folder). CreatedAt is
+// the synced created_at; ModifiedAt is a derived "last activity" — MAX(lww_wall_ts)
+// over the notebook row, its live pages, and those pages' live strokes — so
+// drawing on a page bumps the notebook's modified time even though only the
+// stroke row changed.
 type NotebookRow struct {
-	ID        string
-	Name      string
-	FolderID  string
-	SortOrder int64
-	PageCount int
+	ID         string
+	Name       string
+	FolderID   string
+	SortOrder  int64
+	PageCount  int
+	CreatedAt  int64 // ms UTC, 0 = unset
+	ModifiedAt int64 // ms UTC, derived
 }
+
+// notebookModifiedExpr is the SQLite scalar MAX(...) (NOT the aggregate — there
+// is no GROUP BY) that derives a notebook's "last activity" wall clock. The row
+// term needs no COALESCE (lww_wall_ts is NOT NULL); the subquery terms do (an
+// empty page/stroke set yields NULL). Indexed by idx_fn_page_nb / idx_fn_stroke_pg.
+const notebookModifiedExpr = `MAX(
+		n.lww_wall_ts,
+		COALESCE((SELECT MAX(p.lww_wall_ts) FROM fn_page p
+		            WHERE p.notebook_id = n.id AND p.deleted_at IS NULL), 0),
+		COALESCE((SELECT MAX(s.lww_wall_ts) FROM fn_stroke s
+		            JOIN fn_page p2 ON p2.id = s.page_id
+		           WHERE p2.notebook_id = n.id AND p2.deleted_at IS NULL
+		             AND s.deleted_at IS NULL), 0))`
+
+// notebookPageCountExpr counts a notebook's live pages.
+const notebookPageCountExpr = `(SELECT COUNT(*) FROM fn_page p
+		WHERE p.notebook_id = n.id AND p.deleted_at IS NULL)`
 
 // PageRef identifies a live page within a notebook, in display order.
 type PageRef struct {
@@ -42,7 +70,8 @@ type PageRef struct {
 // link to their parent via ParentFolderID); this read stays flat and cheap.
 func (s *Store) ListFolders(ctx context.Context) ([]FolderRow, error) {
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT id, COALESCE(name, ''), COALESCE(parent_folder_id, ''), COALESCE(sort_order, 0)
+		`SELECT id, COALESCE(name, ''), COALESCE(parent_folder_id, ''), COALESCE(sort_order, 0),
+		        COALESCE(created_at, 0), lww_wall_ts
 		   FROM fn_folder WHERE deleted_at IS NULL ORDER BY sort_order, name`)
 	if err != nil {
 		return nil, fmt.Errorf("list folders: %w", err)
@@ -51,7 +80,7 @@ func (s *Store) ListFolders(ctx context.Context) ([]FolderRow, error) {
 	var out []FolderRow
 	for rows.Next() {
 		var f FolderRow
-		if err := rows.Scan(&f.ID, &f.Name, &f.ParentFolderID, &f.SortOrder); err != nil {
+		if err := rows.Scan(&f.ID, &f.Name, &f.ParentFolderID, &f.SortOrder, &f.CreatedAt, &f.ModifiedAt); err != nil {
 			return nil, fmt.Errorf("scan folder: %w", err)
 		}
 		out = append(out, f)
@@ -64,7 +93,7 @@ func (s *Store) ListFolders(ctx context.Context) ([]FolderRow, error) {
 func (s *Store) ListNotebooks(ctx context.Context) ([]NotebookRow, error) {
 	rows, err := s.db.QueryContext(ctx,
 		`SELECT n.id, COALESCE(n.name, ''), COALESCE(n.folder_id, ''), COALESCE(n.sort_order, 0),
-		        (SELECT COUNT(*) FROM fn_page p WHERE p.notebook_id = n.id AND p.deleted_at IS NULL)
+		        `+notebookPageCountExpr+`, COALESCE(n.created_at, 0), `+notebookModifiedExpr+`
 		   FROM fn_notebook n WHERE n.deleted_at IS NULL ORDER BY n.sort_order, n.name`)
 	if err != nil {
 		return nil, fmt.Errorf("list notebooks: %w", err)
@@ -73,12 +102,177 @@ func (s *Store) ListNotebooks(ctx context.Context) ([]NotebookRow, error) {
 	var out []NotebookRow
 	for rows.Next() {
 		var n NotebookRow
-		if err := rows.Scan(&n.ID, &n.Name, &n.FolderID, &n.SortOrder, &n.PageCount); err != nil {
+		if err := rows.Scan(&n.ID, &n.Name, &n.FolderID, &n.SortOrder, &n.PageCount, &n.CreatedAt, &n.ModifiedAt); err != nil {
 			return nil, fmt.Errorf("scan notebook: %w", err)
 		}
 		out = append(out, n)
 	}
 	return out, rows.Err()
+}
+
+// ListFolderContents returns the direct children of folderID (empty string =
+// root): subfolders whose parent is exactly folderID, and notebooks whose
+// folder is exactly folderID. This backs breadcrumb-style navigation (one
+// level at a time) rather than assembling the whole tree per request.
+func (s *Store) ListFolderContents(ctx context.Context, folderID string) ([]FolderRow, []NotebookRow, error) {
+	frows, err := s.db.QueryContext(ctx,
+		`SELECT id, COALESCE(name, ''), COALESCE(parent_folder_id, ''), COALESCE(sort_order, 0),
+		        COALESCE(created_at, 0), lww_wall_ts
+		   FROM fn_folder
+		  WHERE deleted_at IS NULL AND COALESCE(parent_folder_id, '') = ?
+		  ORDER BY sort_order, name`, folderID)
+	if err != nil {
+		return nil, nil, fmt.Errorf("folder contents (folders): %w", err)
+	}
+	defer frows.Close()
+	var folders []FolderRow
+	for frows.Next() {
+		var f FolderRow
+		if err := frows.Scan(&f.ID, &f.Name, &f.ParentFolderID, &f.SortOrder, &f.CreatedAt, &f.ModifiedAt); err != nil {
+			return nil, nil, fmt.Errorf("scan folder: %w", err)
+		}
+		folders = append(folders, f)
+	}
+	if err := frows.Err(); err != nil {
+		return nil, nil, err
+	}
+
+	nrows, err := s.db.QueryContext(ctx,
+		`SELECT n.id, COALESCE(n.name, ''), COALESCE(n.folder_id, ''), COALESCE(n.sort_order, 0),
+		        `+notebookPageCountExpr+`, COALESCE(n.created_at, 0), `+notebookModifiedExpr+`
+		   FROM fn_notebook n
+		  WHERE n.deleted_at IS NULL AND COALESCE(n.folder_id, '') = ?
+		  ORDER BY n.sort_order, n.name`, folderID)
+	if err != nil {
+		return nil, nil, fmt.Errorf("folder contents (notebooks): %w", err)
+	}
+	defer nrows.Close()
+	var notebooks []NotebookRow
+	for nrows.Next() {
+		var n NotebookRow
+		if err := nrows.Scan(&n.ID, &n.Name, &n.FolderID, &n.SortOrder, &n.PageCount, &n.CreatedAt, &n.ModifiedAt); err != nil {
+			return nil, nil, fmt.Errorf("scan notebook: %w", err)
+		}
+		notebooks = append(notebooks, n)
+	}
+	return folders, notebooks, nrows.Err()
+}
+
+// FolderPath returns the ancestor chain root→folderID (inclusive) for breadcrumb
+// rendering. Returns nil for the root (empty folderID). The depth guard prevents
+// an infinite loop if a corrupt mirror ever produces a parent cycle.
+func (s *Store) FolderPath(ctx context.Context, folderID string) ([]FolderRow, error) {
+	var chain []FolderRow
+	seen := make(map[string]bool)
+	for id := folderID; id != "" && !seen[id]; {
+		seen[id] = true
+		if len(chain) > 64 {
+			break // corrupt-mirror cycle guard
+		}
+		var f FolderRow
+		err := s.db.QueryRowContext(ctx,
+			`SELECT id, COALESCE(name, ''), COALESCE(parent_folder_id, ''), COALESCE(sort_order, 0),
+			        COALESCE(created_at, 0), lww_wall_ts
+			   FROM fn_folder WHERE id = ? AND deleted_at IS NULL`, id).
+			Scan(&f.ID, &f.Name, &f.ParentFolderID, &f.SortOrder, &f.CreatedAt, &f.ModifiedAt)
+		if err == sql.ErrNoRows {
+			break // a deleted/missing ancestor truncates the chain
+		}
+		if err != nil {
+			return nil, fmt.Errorf("folder path: %w", err)
+		}
+		chain = append(chain, f)
+		id = f.ParentFolderID
+	}
+	// Reverse to root→leaf order.
+	for i, j := 0, len(chain)-1; i < j; i, j = i+1, j-1 {
+		chain[i], chain[j] = chain[j], chain[i]
+	}
+	return chain, nil
+}
+
+// LiveNotebookPageIDs returns the live page IDs of a notebook (used to re-enqueue
+// a notebook's pages for reprocessing).
+func (s *Store) LiveNotebookPageIDs(ctx context.Context, notebookID string) ([]string, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT id FROM fn_page WHERE notebook_id = ? AND deleted_at IS NULL ORDER BY sort_order, id`,
+		notebookID)
+	if err != nil {
+		return nil, fmt.Errorf("live notebook pages: %w", err)
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, fmt.Errorf("scan page id: %w", err)
+		}
+		out = append(out, id)
+	}
+	return out, rows.Err()
+}
+
+// SoftDeleteNotebook soft-deletes a notebook plus its live pages and those
+// pages' live strokes in one transaction, bumping lww_wall_ts to now so the
+// delete beats replays of OLDER device ops. It is NOT an authoritative tombstone:
+// because two-way push isn't built, the delete is never relayed, so a subsequent
+// NEWER device edit wins LWW and resurrects the notebook (the bridge re-indexes
+// it). lww_site_id is set to "ub-web" to document UB-local provenance.
+//
+// Returns the IDs of the pages that were live at delete time, so the caller can
+// de-index each forestnote://{nb}/{page} from search + embeddings.
+func (s *Store) SoftDeleteNotebook(ctx context.Context, notebookID string) ([]string, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, fmt.Errorf("begin: %w", err)
+	}
+	defer tx.Rollback()
+
+	now := time.Now().UnixMilli()
+
+	// Capture the pages that are live now (those become the de-index set).
+	prows, err := tx.QueryContext(ctx,
+		`SELECT id FROM fn_page WHERE notebook_id = ? AND deleted_at IS NULL`, notebookID)
+	if err != nil {
+		return nil, fmt.Errorf("collect live pages: %w", err)
+	}
+	var pageIDs []string
+	for prows.Next() {
+		var id string
+		if err := prows.Scan(&id); err != nil {
+			prows.Close()
+			return nil, fmt.Errorf("scan page id: %w", err)
+		}
+		pageIDs = append(pageIDs, id)
+	}
+	prows.Close()
+	if err := prows.Err(); err != nil {
+		return nil, err
+	}
+
+	// Strokes of the notebook's live pages, then the pages, then the notebook.
+	if _, err := tx.ExecContext(ctx,
+		`UPDATE fn_stroke SET deleted_at = ?, lww_wall_ts = ?, lww_site_id = 'ub-web'
+		  WHERE deleted_at IS NULL
+		    AND page_id IN (SELECT id FROM fn_page WHERE notebook_id = ? AND deleted_at IS NULL)`,
+		now, now, notebookID); err != nil {
+		return nil, fmt.Errorf("soft-delete strokes: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx,
+		`UPDATE fn_page SET deleted_at = ?, lww_wall_ts = ?, lww_site_id = 'ub-web'
+		  WHERE notebook_id = ? AND deleted_at IS NULL`, now, now, notebookID); err != nil {
+		return nil, fmt.Errorf("soft-delete pages: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx,
+		`UPDATE fn_notebook SET deleted_at = ?, lww_wall_ts = ?, lww_site_id = 'ub-web'
+		  WHERE id = ? AND deleted_at IS NULL`, now, now, notebookID); err != nil {
+		return nil, fmt.Errorf("soft-delete notebook: %w", err)
+	}
+
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("commit: %w", err)
+	}
+	return pageIDs, nil
 }
 
 // NotebookPages returns a notebook's live pages in display order. The id tie-break
@@ -108,9 +302,10 @@ func (s *Store) NotebookPages(ctx context.Context, notebookID string) ([]PageRef
 func (s *Store) NotebookMeta(ctx context.Context, notebookID string) (NotebookRow, error) {
 	var n NotebookRow
 	err := s.db.QueryRowContext(ctx,
-		`SELECT id, COALESCE(name, ''), COALESCE(folder_id, ''), COALESCE(sort_order, 0)
-		   FROM fn_notebook WHERE id = ? AND deleted_at IS NULL`,
-		notebookID).Scan(&n.ID, &n.Name, &n.FolderID, &n.SortOrder)
+		`SELECT n.id, COALESCE(n.name, ''), COALESCE(n.folder_id, ''), COALESCE(n.sort_order, 0),
+		        `+notebookPageCountExpr+`, COALESCE(n.created_at, 0), `+notebookModifiedExpr+`
+		   FROM fn_notebook n WHERE n.id = ? AND n.deleted_at IS NULL`,
+		notebookID).Scan(&n.ID, &n.Name, &n.FolderID, &n.SortOrder, &n.PageCount, &n.CreatedAt, &n.ModifiedAt)
 	if err != nil {
 		if err == sql.ErrNoRows {
 			return NotebookRow{}, err

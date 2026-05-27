@@ -14,6 +14,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"time"
 
 	"github.com/sysop/ultrabridge/internal/source"
 	"github.com/sysop/ultrabridge/internal/syncbridge"
@@ -114,3 +115,48 @@ func (s *Source) SyncService() *syncsvc.Service { return s.syncSvc }
 // Store returns the syncstore mirror, consumed by the note service for the
 // Files tab inventory and on-the-fly page rendering (nil until Start).
 func (s *Source) Store() *syncstore.Store { return s.store }
+
+// reprocessChunk bounds how many page PKs are handed to the bridge per burst.
+// The bridge queue is 256-buffered and drops on overflow (bridge.go), so we
+// enqueue in sub-buffer chunks, yielding between them to let the worker drain.
+// Realistic notebooks sit well under one chunk; this only matters for very large
+// ones, and any dropped page re-renders on its next device-side change anyway.
+const reprocessChunk = 128
+
+// ReprocessNotebook re-enqueues every live page of a notebook onto the bridge
+// queue for a fresh render → OCR → index → embed pass (e.g. after an OCR model
+// or prompt change). The actual work happens asynchronously on the bridge
+// worker; this returns once the pages are read. No-op if the source isn't
+// started (bridge nil).
+func (s *Source) ReprocessNotebook(ctx context.Context, notebookID string) error {
+	if s.store == nil || s.bridge == nil {
+		return fmt.Errorf("forestnote source not started")
+	}
+	pageIDs, err := s.store.LiveNotebookPageIDs(ctx, notebookID)
+	if err != nil {
+		return fmt.Errorf("reprocess notebook %s: %w", notebookID, err)
+	}
+	if len(pageIDs) == 0 {
+		return nil
+	}
+	pks := make([]syncstore.TablePK, len(pageIDs))
+	for i, id := range pageIDs {
+		pks[i] = syncstore.TablePK{Table: "page", PK: id}
+	}
+	// Enqueue off the request goroutine, chunked, so a large notebook neither
+	// blocks the caller nor overruns the bridge's bounded queue in one burst.
+	go func() {
+		bg := context.Background()
+		for off := 0; off < len(pks); off += reprocessChunk {
+			end := off + reprocessChunk
+			if end > len(pks) {
+				end = len(pks)
+			}
+			s.bridge.PagesChanged(bg, pks[off:end])
+			if end < len(pks) {
+				time.Sleep(50 * time.Millisecond)
+			}
+		}
+	}()
+	return nil
+}

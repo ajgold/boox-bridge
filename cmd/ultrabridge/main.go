@@ -717,6 +717,7 @@ func main() {
 		// and render pages on the fly from the syncstore mirror.
 		if fnSource != nil {
 			noteSvc.SetForestNoteReader(fnSource.Store())
+			noteSvc.SetForestNoteReprocessor(fnSource)
 		}
 
 		// 3. Search Service

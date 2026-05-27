@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"io"
 	"log/slog"
+	"strings"
 	"time"
 
 	"github.com/sysop/ultrabridge/internal/logging"
@@ -116,6 +117,12 @@ type mockNoteService struct {
 	fnUnfiled         []service.ForestNoteNotebook
 	fnNotebookName    string
 	fnPages           []service.ForestNotePage
+	fnEntries         []service.ForestNoteEntry
+	fnCrumbs          []service.ForestNoteCrumb
+	fnDetail          service.ForestNoteNotebookDetail
+	fnReprocessed     []string
+	fnDeleted         []string
+	fnExportPDF       []byte
 }
 
 func (m *mockNoteService) ListFiles(ctx context.Context, path, sort, order string, page, perPage int) ([]service.NoteFile, int, error) {
@@ -238,6 +245,24 @@ func (m *mockNoteService) ListForestNoteTree(ctx context.Context) ([]service.For
 }
 func (m *mockNoteService) ListForestNotePages(ctx context.Context, notebookID string) (string, []service.ForestNotePage, error) {
 	return m.fnNotebookName, m.fnPages, nil
+}
+func (m *mockNoteService) SetForestNoteReprocessor(r service.ForestNoteReprocessor) {}
+func (m *mockNoteService) ListForestNoteFolder(ctx context.Context, folderID, sortField, order string) ([]service.ForestNoteCrumb, []service.ForestNoteEntry, error) {
+	return m.fnCrumbs, m.fnEntries, nil
+}
+func (m *mockNoteService) GetForestNoteNotebookDetail(ctx context.Context, notebookID string) (service.ForestNoteNotebookDetail, error) {
+	return m.fnDetail, nil
+}
+func (m *mockNoteService) DeleteForestNoteNotebook(ctx context.Context, notebookID string) error {
+	m.fnDeleted = append(m.fnDeleted, notebookID)
+	return nil
+}
+func (m *mockNoteService) ReprocessForestNoteNotebook(ctx context.Context, notebookID string) error {
+	m.fnReprocessed = append(m.fnReprocessed, notebookID)
+	return nil
+}
+func (m *mockNoteService) ExportForestNoteNotebookPDF(ctx context.Context, notebookID string) (io.ReadCloser, string, error) {
+	return io.NopCloser(strings.NewReader(string(m.fnExportPDF))), "notebook.pdf", nil
 }
 func (m *mockNoteService) StartProcessor(ctx context.Context) error {
 	m.processorStarted = true

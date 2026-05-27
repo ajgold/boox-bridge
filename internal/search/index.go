@@ -20,6 +20,9 @@ type SearchIndex interface {
 	IndexPage(ctx context.Context, path string, pageIdx int, source, bodyText, titleText, keywords string) error
 	// GetContent returns all indexed content for a note, ordered by page.
 	GetContent(ctx context.Context, path string) ([]NoteDocument, error)
+	// GetContentByPrefix returns indexed content for every note_path matching the
+	// LIKE pattern (e.g. "forestnote://{nb}/%"), keyed by note_path.
+	GetContentByPrefix(ctx context.Context, likePattern string) (map[string]NoteDocument, error)
 	// ListFolders returns distinct parent directory names from indexed content.
 	ListFolders(ctx context.Context) ([]string, error)
 }
@@ -196,6 +199,33 @@ func (s *Store) GetContent(ctx context.Context, path string) ([]NoteDocument, er
 		docs = append(docs, d)
 	}
 	return docs, rows.Err()
+}
+
+// GetContentByPrefix returns indexed content for every note_path matching the
+// given LIKE prefix pattern, keyed by note_path. It exists so a caller can fetch
+// all of a ForestNote notebook's per-page documents (each indexed on a distinct
+// forestnote://{nb}/{page} path) in one query instead of N GetContent round-trips
+// against the single-writer notedb. The caller supplies the full LIKE pattern
+// (e.g. "forestnote://{nb}/%"); backslash is the escape char so literal % / _ in
+// the prefix are matched verbatim.
+func (s *Store) GetContentByPrefix(ctx context.Context, likePattern string) (map[string]NoteDocument, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT note_path, page, COALESCE(title_text,''), COALESCE(body_text,''),
+		       COALESCE(keywords,''), COALESCE(source,''), COALESCE(model,'')
+		FROM note_content WHERE note_path LIKE ? ESCAPE '\' ORDER BY note_path, page`, likePattern)
+	if err != nil {
+		return nil, fmt.Errorf("get content by prefix: %w", err)
+	}
+	defer rows.Close()
+	out := make(map[string]NoteDocument)
+	for rows.Next() {
+		var d NoteDocument
+		if err := rows.Scan(&d.Path, &d.Page, &d.TitleText, &d.BodyText, &d.Keywords, &d.Source, &d.Model); err != nil {
+			return nil, fmt.Errorf("get content by prefix scan: %w", err)
+		}
+		out[d.Path] = d
+	}
+	return out, rows.Err()
 }
 
 // escapeFTS5 wraps the user query in double quotes and escapes internal quotes,

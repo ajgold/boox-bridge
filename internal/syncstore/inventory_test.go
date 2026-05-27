@@ -137,6 +137,171 @@ func TestNotebookPages_OrderAndSoftDelete(t *testing.T) {
 	}
 }
 
+// strokeOnPage builds a stroke op (valid base64 points) on the given page.
+func strokeOnPage(seq, wall int64, pk, pageID string, deletedAt any) Op {
+	return Op{
+		Table: "stroke", PK: pk, SiteID: siteA, OpSeq: seq, WallTS: wall,
+		Cols: map[string]any{
+			"page_id": pageID, "color": float64(4278190080), "pen_width_min": float64(2),
+			"pen_width_max": float64(6), "points": "MgAAADwAAADIAAAAAAAAAAEAAAA=",
+			"z": float64(0), "created_at": float64(1000), "deleted_at": deletedAt,
+		},
+	}
+}
+
+func TestListNotebooks_CreatedAndDerivedModified(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	// Notebook authored at wall 1000; a page at 2000; a stroke on it at 5000.
+	// A second page that was later soft-deleted at 9000 must NOT raise Modified
+	// (only LIVE pages/strokes feed the rollup).
+	if _, err := s.ApplyBatch(ctx, siteA, []Op{
+		nbInFolder(1, 1000, nbA, "NB", "", nil),
+		pageOp(2, 2000, pgA, nbA, 0, nil),
+		strokeOnPage(3, 5000, "00000000000000000000000ST1", pgA, nil),
+		pageOp(4, 9000, pgB, nbA, 1, float64(9000)), // soft-deleted page (deleted op wall 9000)
+	}); err != nil {
+		t.Fatalf("apply: %v", err)
+	}
+	nbs, err := s.ListNotebooks(ctx)
+	if err != nil {
+		t.Fatalf("list notebooks: %v", err)
+	}
+	if len(nbs) != 1 {
+		t.Fatalf("want 1 notebook, got %d", len(nbs))
+	}
+	n := nbs[0]
+	if n.CreatedAt != 1000 {
+		t.Errorf("CreatedAt = %d, want 1000", n.CreatedAt)
+	}
+	// Modified = MAX(notebook 1000, live page 2000, live stroke 5000) = 5000.
+	// The soft-deleted page's op (wall 9000) is excluded.
+	if n.ModifiedAt != 5000 {
+		t.Errorf("ModifiedAt = %d, want 5000 (deleted page excluded)", n.ModifiedAt)
+	}
+	if n.PageCount != 1 {
+		t.Errorf("PageCount = %d, want 1", n.PageCount)
+	}
+}
+
+func TestListFolderContents_DirectChildrenOnly(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	gc := "0000000000000000000000FDGC" // grandchild folder under fdrB
+	if _, err := s.ApplyBatch(ctx, siteA, []Op{
+		folderOp(1, 1000, fdrA, "Parent", "", nil),
+		folderOp(2, 1010, fdrB, "Child", fdrA, nil),
+		folderOp(3, 1020, gc, "Grandchild", fdrB, nil),
+		nbInFolder(4, 1030, nbA, "InParent", fdrA, nil),
+		nbInFolder(5, 1040, nbB, "AtRoot", "", nil),
+	}); err != nil {
+		t.Fatalf("apply: %v", err)
+	}
+	// Root: one folder (fdrA), one notebook (nbB).
+	folders, nbs, err := s.ListFolderContents(ctx, "")
+	if err != nil {
+		t.Fatalf("root contents: %v", err)
+	}
+	if len(folders) != 1 || folders[0].ID != fdrA {
+		t.Errorf("root folders = %+v, want [fdrA]", folders)
+	}
+	if len(nbs) != 1 || nbs[0].ID != nbB {
+		t.Errorf("root notebooks = %+v, want [nbB]", nbs)
+	}
+	// Under fdrA: one subfolder (fdrB), one notebook (nbA). The grandchild folder
+	// must NOT appear (it's under fdrB, not fdrA).
+	folders, nbs, err = s.ListFolderContents(ctx, fdrA)
+	if err != nil {
+		t.Fatalf("fdrA contents: %v", err)
+	}
+	if len(folders) != 1 || folders[0].ID != fdrB {
+		t.Errorf("fdrA folders = %+v, want [fdrB]", folders)
+	}
+	if len(nbs) != 1 || nbs[0].ID != nbA {
+		t.Errorf("fdrA notebooks = %+v, want [nbA]", nbs)
+	}
+}
+
+func TestFolderPath_RootToLeaf(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	gc := "0000000000000000000000FDGC"
+	if _, err := s.ApplyBatch(ctx, siteA, []Op{
+		folderOp(1, 1000, fdrA, "Parent", "", nil),
+		folderOp(2, 1010, fdrB, "Child", fdrA, nil),
+		folderOp(3, 1020, gc, "Grandchild", fdrB, nil),
+	}); err != nil {
+		t.Fatalf("apply: %v", err)
+	}
+	chain, err := s.FolderPath(ctx, gc)
+	if err != nil {
+		t.Fatalf("folder path: %v", err)
+	}
+	if len(chain) != 3 || chain[0].ID != fdrA || chain[1].ID != fdrB || chain[2].ID != gc {
+		t.Errorf("chain = %+v, want [fdrA, fdrB, gc]", chain)
+	}
+	// Root path is empty.
+	if chain, err := s.FolderPath(ctx, ""); err != nil || chain != nil {
+		t.Errorf("root path = %+v, %v; want nil, nil", chain, err)
+	}
+}
+
+func TestSoftDeleteNotebook_DeindexSetAndLiveness(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	if _, err := s.ApplyBatch(ctx, siteA, []Op{
+		nbInFolder(1, 1000, nbA, "NB", "", nil),
+		pageOp(2, 2000, pgA, nbA, 0, nil),
+		pageOp(3, 2010, pgB, nbA, 1, nil),
+		strokeOnPage(4, 2020, "00000000000000000000000ST1", pgA, nil),
+	}); err != nil {
+		t.Fatalf("apply: %v", err)
+	}
+	pageIDs, err := s.SoftDeleteNotebook(ctx, nbA)
+	if err != nil {
+		t.Fatalf("soft-delete: %v", err)
+	}
+	if len(pageIDs) != 2 {
+		t.Fatalf("want 2 affected page IDs, got %d: %v", len(pageIDs), pageIDs)
+	}
+	// Notebook no longer listed; pages no longer live.
+	nbs, err := s.ListNotebooks(ctx)
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if len(nbs) != 0 {
+		t.Errorf("want 0 live notebooks after delete, got %d", len(nbs))
+	}
+	for _, pid := range []string{pgA, pgB} {
+		if _, live, err := s.LivePage(ctx, pid); err != nil || live {
+			t.Errorf("page %s live=%v err=%v, want live=false", pid, live, err)
+		}
+	}
+	if strokes, err := s.LivePageStrokes(ctx, pgA); err != nil || len(strokes) != 0 {
+		t.Errorf("page %s strokes = %d (err %v), want 0", pgA, len(strokes), err)
+	}
+}
+
+func TestLiveNotebookPageIDs(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	if _, err := s.ApplyBatch(ctx, siteA, []Op{
+		nbInFolder(1, 1000, nbA, "NB", "", nil),
+		pageOp(2, 2000, pgA, nbA, 0, nil),
+		pageOp(3, 2010, pgB, nbA, 1, nil),
+		pageOp(4, 2020, "00000000000000000000000PGD", nbA, 2, float64(2020)), // deleted
+	}); err != nil {
+		t.Fatalf("apply: %v", err)
+	}
+	ids, err := s.LiveNotebookPageIDs(ctx, nbA)
+	if err != nil {
+		t.Fatalf("live page ids: %v", err)
+	}
+	if len(ids) != 2 || ids[0] != pgA || ids[1] != pgB {
+		t.Errorf("ids = %v, want [%s %s]", ids, pgA, pgB)
+	}
+}
+
 func TestNotebookMeta_LiveOnly(t *testing.T) {
 	s := newTestStore(t)
 	ctx := context.Background()
