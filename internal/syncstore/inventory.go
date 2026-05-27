@@ -336,6 +336,75 @@ func (s *Store) SoftDeleteNotebook(ctx context.Context, notebookID string) ([]st
 	return pageIDs, nil
 }
 
+// TextBoxRef identifies a live text box for discovery (e.g. by an MCP agent that
+// wants to edit one): its ULID, the page it lives on, and its current text.
+type TextBoxRef struct {
+	ID     string
+	PageID string
+	Text   string
+	Z      int64
+}
+
+// ListNotebookTextBoxes returns every live text box on a notebook's live pages,
+// ordered by page then z. Backs text-box discovery before an edit.
+func (s *Store) ListNotebookTextBoxes(ctx context.Context, notebookID string) ([]TextBoxRef, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT t.id, t.page_id, COALESCE(t.text, ''), COALESCE(t.z, 0)
+		   FROM fn_text_box t
+		   JOIN fn_page p ON p.id = t.page_id
+		  WHERE p.notebook_id = ? AND p.deleted_at IS NULL AND t.deleted_at IS NULL
+		  ORDER BY p.sort_order, p.id, t.z, t.id`, notebookID)
+	if err != nil {
+		return nil, fmt.Errorf("list notebook text boxes: %w", err)
+	}
+	defer rows.Close()
+	var out []TextBoxRef
+	for rows.Next() {
+		var r TextBoxRef
+		if err := rows.Scan(&r.ID, &r.PageID, &r.Text, &r.Z); err != nil {
+			return nil, fmt.Errorf("scan text box ref: %w", err)
+		}
+		out = append(out, r)
+	}
+	return out, rows.Err()
+}
+
+// EditTextBoxText authors a server-side edit of one text box's text. It reads the
+// box's current full row and re-authors it as a text_box upsert with the new text
+// (every other column preserved) through AuthorOps — so the edit is recorded in
+// the changelog under UB's site_id and relayed to the user's devices on their next
+// pull, then resolved by the same LWW rule as a device edit. Returns the box's
+// page_id so the caller can re-render/re-index that page. Errors if the box is
+// missing or already deleted (a tombstoned box is not editable).
+func (s *Store) EditTextBoxText(ctx context.Context, boxID, newText string) (pageID string, err error) {
+	var pid, text, fontName string
+	var x, y, w, h, fontSize, color, weight, border, z, created int64
+	var del sql.NullInt64
+	switch e := s.db.QueryRowContext(ctx,
+		`SELECT page_id, x, y, width, height, text, font_name, font_size, color, weight, border_width, z, created_at, deleted_at
+		   FROM fn_text_box WHERE id = ?`, boxID).
+		Scan(&pid, &x, &y, &w, &h, &text, &fontName, &fontSize, &color, &weight, &border, &z, &created, &del); e {
+	case nil:
+	case sql.ErrNoRows:
+		return "", fmt.Errorf("text box not found: %s", boxID)
+	default:
+		return "", fmt.Errorf("read text box: %w", e)
+	}
+	if del.Valid {
+		return "", fmt.Errorf("text box is deleted: %s", boxID)
+	}
+	op := Op{Table: "text_box", PK: boxID, Cols: map[string]any{
+		"page_id": pid, "x": float64(x), "y": float64(y), "width": float64(w), "height": float64(h),
+		"text": newText, "font_name": fontName, "font_size": float64(fontSize), "color": float64(color),
+		"weight": float64(weight), "border_width": float64(border), "z": float64(z),
+		"created_at": float64(created), "deleted_at": nil,
+	}}
+	if _, err := s.AuthorOps(ctx, []Op{op}); err != nil {
+		return "", fmt.Errorf("author text box edit: %w", err)
+	}
+	return pid, nil
+}
+
 // NotebookPages returns a notebook's live pages in display order. The id tie-break
 // keeps ordering stable when sort_order values collide.
 func (s *Store) NotebookPages(ctx context.Context, notebookID string) ([]PageRef, error) {

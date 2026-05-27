@@ -10,6 +10,7 @@ import (
 
 	"github.com/sysop/ultrabridge/internal/logging"
 	"github.com/sysop/ultrabridge/internal/service"
+	"github.com/sysop/ultrabridge/internal/syncstore"
 )
 
 // newTestHandler creates a Handler with default mocks for testing.
@@ -123,6 +124,8 @@ type mockNoteService struct {
 	fnReprocessed     []string
 	fnDeleted         []string
 	fnExportPDF       []byte
+	fnTextBoxes       []syncstore.TextBoxRef
+	fnEdited          []string
 }
 
 func (m *mockNoteService) ListFiles(ctx context.Context, path, sort, order string, page, perPage int) ([]service.NoteFile, int, error) {
@@ -263,6 +266,13 @@ func (m *mockNoteService) ReprocessForestNoteNotebook(ctx context.Context, noteb
 }
 func (m *mockNoteService) ExportForestNoteNotebookPDF(ctx context.Context, notebookID string) (io.ReadCloser, string, error) {
 	return io.NopCloser(strings.NewReader(string(m.fnExportPDF))), "notebook.pdf", nil
+}
+func (m *mockNoteService) ListForestNoteTextBoxes(ctx context.Context, notebookID string) ([]syncstore.TextBoxRef, error) {
+	return m.fnTextBoxes, nil
+}
+func (m *mockNoteService) EditForestNoteTextBox(ctx context.Context, boxID, newText string) error {
+	m.fnEdited = append(m.fnEdited, boxID+"="+newText)
+	return nil
 }
 func (m *mockNoteService) StartProcessor(ctx context.Context) error {
 	m.processorStarted = true

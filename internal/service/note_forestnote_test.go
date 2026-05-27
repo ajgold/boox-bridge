@@ -38,6 +38,9 @@ func (f *fakeFNReader) SoftDeleteNotebook(_ context.Context, nb string) ([]strin
 	f.deleted = append(f.deleted, nb)
 	return f.deletePages[nb], nil
 }
+func (f *fakeFNReader) ListNotebookTextBoxes(_ context.Context, nb string) ([]syncstore.TextBoxRef, error) {
+	return nil, nil
+}
 func (f *fakeFNReader) LiveNotebookPageIDs(_ context.Context, nb string) ([]string, error) {
 	var ids []string
 	for _, p := range f.pages[nb] {
@@ -185,6 +188,11 @@ type fakeReprocessor struct {
 
 func (f *fakeReprocessor) ReprocessNotebook(_ context.Context, nb string) error {
 	f.called = append(f.called, nb)
+	return f.err
+}
+
+func (f *fakeReprocessor) EditTextBox(_ context.Context, boxID, _ string) error {
+	f.called = append(f.called, "edit:"+boxID)
 	return f.err
 }
 

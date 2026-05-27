@@ -226,6 +226,114 @@ func TestSoftDeleteNotebook_RelaysTombstones(t *testing.T) {
 	}
 }
 
+// A server-authored text-box edit must update the mirror AND emit a relayable op
+// (UB site_id) carrying the new text, so devices pull the change.
+func TestEditTextBoxText_AuthorsAndUpdates(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	ubSite, _ := s.SiteID(ctx)
+	const tb1 = "00000000000000000000000TB1"
+
+	// A device creates a page + a text box.
+	if _, err := s.ApplyBatch(ctx, siteA, []Op{
+		pageOp(1, 1000, pgA, nbA, 0, nil),
+		{Table: "text_box", PK: tb1, SiteID: siteA, OpSeq: 2, WallTS: 1010,
+			Cols: map[string]any{
+				"page_id": pgA, "x": float64(1), "y": float64(2), "width": float64(100), "height": float64(50),
+				"text": "before", "font_name": "Roboto-Regular.ttf", "font_size": float64(200),
+				"color": float64(4278190080), "weight": float64(400), "border_width": float64(2),
+				"z": float64(0), "created_at": float64(1000), "deleted_at": nil,
+			}},
+	}); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	cursorBefore, _ := s.LastSeq(ctx)
+
+	pageID, err := s.EditTextBoxText(ctx, tb1, "after")
+	if err != nil {
+		t.Fatalf("edit: %v", err)
+	}
+	if pageID != pgA {
+		t.Errorf("page id = %q, want %q", pageID, pgA)
+	}
+
+	// Mirror updated, other columns preserved.
+	var text, font string
+	var width int64
+	if err := s.db.QueryRowContext(ctx,
+		`SELECT text, font_name, width FROM fn_text_box WHERE id = ?`, tb1).Scan(&text, &font, &width); err != nil {
+		t.Fatalf("query: %v", err)
+	}
+	if text != "after" || font != "Roboto-Regular.ttf" || width != 100 {
+		t.Errorf("mirror = text=%q font=%q width=%d, want after/Roboto/100", text, font, width)
+	}
+
+	// A device pulls exactly the UB-authored edit op carrying the new text.
+	ops, _, _, err := s.OpsSince(ctx, cursorBefore, siteA, 500)
+	if err != nil {
+		t.Fatalf("OpsSince: %v", err)
+	}
+	if len(ops) != 1 || ops[0].SiteID != ubSite || ops[0].Table != "text_box" || ops[0].Cols["text"] != "after" {
+		t.Fatalf("relayed = %+v, want one UB text_box op with text=after", ops)
+	}
+}
+
+func TestEditTextBoxText_MissingAndDeleted(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	const tb1 = "00000000000000000000000TB1"
+
+	if _, err := s.EditTextBoxText(ctx, tb1, "x"); err == nil {
+		t.Error("editing a missing box should error")
+	}
+
+	// Create then delete the box; editing a tombstone must error.
+	if _, err := s.ApplyBatch(ctx, siteA, []Op{
+		pageOp(1, 1000, pgA, nbA, 0, nil),
+		{Table: "text_box", PK: tb1, SiteID: siteA, OpSeq: 2, WallTS: 1010,
+			Cols: map[string]any{
+				"page_id": pgA, "x": float64(0), "y": float64(0), "width": float64(10), "height": float64(10),
+				"text": "t", "font_name": "", "font_size": float64(100), "color": float64(4278190080),
+				"weight": float64(400), "border_width": float64(0), "z": float64(0),
+				"created_at": float64(1000), "deleted_at": float64(2000), // already deleted
+			}},
+	}); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	if _, err := s.EditTextBoxText(ctx, tb1, "x"); err == nil {
+		t.Error("editing a deleted box should error")
+	}
+}
+
+func TestListNotebookTextBoxes(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	const tb1, tb2 = "00000000000000000000000TB1", "00000000000000000000000TB2"
+	box := func(seq, wall int64, pk, page, text string, del any) Op {
+		return Op{Table: "text_box", PK: pk, SiteID: siteA, OpSeq: seq, WallTS: wall,
+			Cols: map[string]any{
+				"page_id": page, "x": float64(0), "y": float64(0), "width": float64(10), "height": float64(10),
+				"text": text, "font_name": "", "font_size": float64(100), "color": float64(4278190080),
+				"weight": float64(400), "border_width": float64(0), "z": float64(0),
+				"created_at": float64(1000), "deleted_at": del,
+			}}
+	}
+	if _, err := s.ApplyBatch(ctx, siteA, []Op{
+		pageOp(1, 1000, pgA, nbA, 0, nil),
+		box(2, 1010, tb1, pgA, "live one", nil),
+		box(3, 1020, tb2, pgA, "deleted one", float64(1030)), // deleted → excluded
+	}); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	refs, err := s.ListNotebookTextBoxes(ctx, nbA)
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if len(refs) != 1 || refs[0].ID != tb1 || refs[0].PageID != pgA || refs[0].Text != "live one" {
+		t.Fatalf("refs = %+v, want one live box tb1/pgA/'live one'", refs)
+	}
+}
+
 // A malformed op (missing a known column) is rejected before anything is written.
 func TestAuthorOps_RejectsMalformed(t *testing.T) {
 	s := newTestStore(t)

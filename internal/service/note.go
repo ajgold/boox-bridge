@@ -93,13 +93,20 @@ type ForestNoteReader interface {
 	FolderPath(ctx context.Context, folderID string) ([]syncstore.FolderRow, error)
 	SoftDeleteNotebook(ctx context.Context, notebookID string) ([]string, error)
 	LiveNotebookPageIDs(ctx context.Context, notebookID string) ([]string, error)
+	ListNotebookTextBoxes(ctx context.Context, notebookID string) ([]syncstore.TextBoxRef, error)
 }
 
-// ForestNoteReprocessor re-enqueues a notebook's live pages onto the sync bridge
-// for a fresh render → OCR → index → embed pass. *forestnote.Source satisfies it.
-// Set via SetForestNoteReprocessor only when a ForestNote source is active.
+// ForestNoteReprocessor is the source-level write/render seam (it holds both the
+// store and the bridge, which the narrow ForestNoteReader does not).
+// *forestnote.Source satisfies it. Set via SetForestNoteReprocessor only when a
+// ForestNote source is active.
 type ForestNoteReprocessor interface {
+	// ReprocessNotebook re-enqueues a notebook's live pages for a fresh
+	// render → OCR → index → embed pass.
 	ReprocessNotebook(ctx context.Context, notebookID string) error
+	// EditTextBox authors a server-side text-box edit (relayed to devices) and
+	// re-renders/re-indexes the affected page.
+	EditTextBox(ctx context.Context, boxID, newText string) error
 }
 
 type noteService struct {
@@ -782,6 +789,24 @@ func (s *noteService) ReprocessForestNoteNotebook(ctx context.Context, notebookI
 		return fmt.Errorf("forestnote reprocessing not available")
 	}
 	return s.fnReprocessor.ReprocessNotebook(ctx, notebookID)
+}
+
+// ListForestNoteTextBoxes returns a notebook's live text boxes (id, page, text)
+// for discovery before an edit.
+func (s *noteService) ListForestNoteTextBoxes(ctx context.Context, notebookID string) ([]syncstore.TextBoxRef, error) {
+	if s.fnReader == nil {
+		return nil, fmt.Errorf("forestnote source not available")
+	}
+	return s.fnReader.ListNotebookTextBoxes(ctx, notebookID)
+}
+
+// EditForestNoteTextBox authors a server-side edit of a text box's text (relayed
+// to devices) and re-renders/re-indexes the affected page.
+func (s *noteService) EditForestNoteTextBox(ctx context.Context, boxID, newText string) error {
+	if s.fnReprocessor == nil {
+		return fmt.Errorf("forestnote editing not available")
+	}
+	return s.fnReprocessor.EditTextBox(ctx, boxID, newText)
 }
 
 // ExportForestNoteNotebookPDF renders a notebook's live pages to JPEG (reusing

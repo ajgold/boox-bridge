@@ -116,6 +116,24 @@ func (s *Source) SyncService() *syncsvc.Service { return s.syncSvc }
 // Files tab inventory and on-the-fly page rendering (nil until Start).
 func (s *Source) Store() *syncstore.Store { return s.store }
 
+// EditTextBox applies a server-authored edit to a text box's text: the store
+// authors a relayable text_box op (so the change reaches devices on their next
+// sync), then the affected page is re-enqueued on the bridge so its rendered
+// image and search index refresh. No-op-safe if the source isn't started.
+func (s *Source) EditTextBox(ctx context.Context, boxID, newText string) error {
+	if s.store == nil {
+		return fmt.Errorf("forestnote source not started")
+	}
+	pageID, err := s.store.EditTextBoxText(ctx, boxID, newText)
+	if err != nil {
+		return err
+	}
+	if s.bridge != nil {
+		s.bridge.PagesChanged(ctx, []syncstore.TablePK{{Table: "page", PK: pageID}})
+	}
+	return nil
+}
+
 // reprocessChunk bounds how many page PKs are handed to the bridge per burst.
 // The bridge queue is 256-buffered and drops on overflow (bridge.go), so we
 // enqueue in sub-buffer chunks, yielding between them to let the worker drain.
