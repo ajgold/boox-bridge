@@ -14,6 +14,7 @@ import (
 	"sort"
 
 	"github.com/fogleman/gg"
+	xdraw "golang.org/x/image/draw"
 )
 
 const (
@@ -37,7 +38,36 @@ const (
 
 	// maxCanvas caps a runaway bounding box (defensive).
 	maxCanvas = 20000
+
+	// renderScale shrinks the final page image. The canvas is built at 1:1 with
+	// the virtual-unit coordinate space (short axis = 10,000), which yields a
+	// ~10000px-tall, ~100-megapixel, multi-MB JPEG — needlessly slow to OCR,
+	// transfer, and display. We render at full resolution, then downscale the
+	// finished image by this factor so strokes AND text-box glyphs shrink
+	// uniformly (scaling gg's draw ops directly does not scale rasterized text).
+	// 0.5 = half each dimension ≈ a quarter of the pixels/bytes. 1.0 disables.
+	renderScale = 0.5
 )
+
+// downscale resamples img by renderScale with a high-quality filter (kept sharp
+// for OCR legibility). A no-op when renderScale == 1.
+func downscale(img image.Image) image.Image {
+	if renderScale == 1.0 {
+		return img
+	}
+	b := img.Bounds()
+	w := int(float64(b.Dx()) * renderScale)
+	h := int(float64(b.Dy()) * renderScale)
+	if w < 1 {
+		w = 1
+	}
+	if h < 1 {
+		h = 1
+	}
+	dst := image.NewRGBA(image.Rect(0, 0, w, h))
+	xdraw.CatmullRom.Scale(dst, dst.Bounds(), img, b, xdraw.Over, nil)
+	return dst
+}
 
 // Stroke is one renderable stroke. The bridge maps a fn_stroke mirror row onto
 // this; forestrender does not import syncstore (keeps rendering dependency-free).
@@ -145,7 +175,7 @@ func RenderPage(strokes []Stroke, boxes []TextBox) (image.Image, error) {
 		dc := gg.NewContext(100, 100)
 		dc.SetColor(color.White)
 		dc.Clear()
-		return dc.Image(), nil
+		return downscale(dc.Image()), nil
 	}
 
 	w := clampCanvas(int(maxX-minX) + 2*margin)
@@ -183,7 +213,7 @@ func RenderPage(strokes []Stroke, boxes []TextBox) (image.Image, error) {
 			drawBox(dc, b, offX, offY)
 		}
 	}
-	return dc.Image(), nil
+	return downscale(dc.Image()), nil
 }
 
 // drawBox paints one text box: an optional border rect, then the wrapped text

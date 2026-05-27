@@ -79,9 +79,9 @@ func TestRenderPage_DrawsTextBoxWithNoStrokes(t *testing.T) {
 	if nonWhitePixels(img) == 0 {
 		t.Error("expected a visible text box (border + glyphs), got blank canvas")
 	}
-	// Canvas must contain the box extent (4000x1000) + 2*margin, proving boxes
-	// drive the bounding box even with no strokes.
-	if img.Bounds().Dx() < 4000 || img.Bounds().Dy() < 1000 {
+	// Canvas must contain the box extent (4000x1000) + 2*margin, scaled by
+	// renderScale — proving boxes drive the bounding box even with no strokes.
+	if img.Bounds().Dx() < int(4000*renderScale) || img.Bounds().Dy() < int(1000*renderScale) {
 		t.Errorf("canvas %dx%d too small to contain the box", img.Bounds().Dx(), img.Bounds().Dy())
 	}
 }
@@ -98,8 +98,9 @@ func TestRenderPage_DrawsStroke(t *testing.T) {
 	if nonWhitePixels(img) == 0 {
 		t.Error("expected a visible stroke, got blank canvas")
 	}
-	// Canvas should be the stroke extent (50x50) plus 2*margin in each axis.
-	want := 50 + 2*margin
+	// Canvas is the stroke extent (50x50) plus 2*margin in each axis, then
+	// downscaled by renderScale.
+	want := int(float64(50+2*margin) * renderScale)
 	if img.Bounds().Dx() != want || img.Bounds().Dy() != want {
 		t.Errorf("canvas = %dx%d, want %dx%d", img.Bounds().Dx(), img.Bounds().Dy(), want, want)
 	}
