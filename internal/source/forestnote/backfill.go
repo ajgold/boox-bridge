@@ -63,34 +63,51 @@ func backfillPageText(ctx context.Context, db *sql.DB, store *syncstore.Store, l
 	// Indexed ForestNote page text. FN indexes one row per page at page 0 (source
 	// "forestnote"); an empty body has nothing to push, so the live bridge tombstones
 	// it — backfill simply skips it.
+	//
+	// The candidates are fully drained into a slice BEFORE any AuthorPageText call:
+	// notedb runs MaxOpenConns(1), so an open cursor owns the only connection, and
+	// AuthorOps' BeginTx would deadlock waiting for a second one. (Same discipline as
+	// SoftDeleteNotebook — read, close, then author.)
+	type pending struct {
+		pageID, body, model string
+		ocrAt               int64
+	}
 	rows, err := db.QueryContext(ctx,
 		`SELECT note_path, COALESCE(body_text, ''), COALESCE(model, ''), indexed_at
 		   FROM note_content WHERE note_path LIKE 'forestnote://%'`)
 	if err != nil {
 		return 0, fmt.Errorf("scan note_content: %w", err)
 	}
-	defer rows.Close()
-
-	authored := 0
+	var todo []pending
 	for rows.Next() {
-		if err := ctx.Err(); err != nil {
-			return authored, err
-		}
 		var notePath, body, model string
 		var indexedAt int64
 		if err := rows.Scan(&notePath, &body, &model, &indexedAt); err != nil {
-			return authored, fmt.Errorf("scan content row: %w", err)
+			rows.Close()
+			return 0, fmt.Errorf("scan content row: %w", err)
 		}
 		pageID := fnpath.PageID(notePath)
 		if body == "" || have[pageID] || !live[pageID] || !syncstore.IsULID(pageID) {
 			continue
 		}
-		if err := store.AuthorPageText(ctx, pageID, body, indexedAt, model); err != nil {
+		todo = append(todo, pending{pageID: pageID, body: body, model: model, ocrAt: indexedAt})
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return 0, fmt.Errorf("iterate note_content: %w", err)
+	}
+
+	authored := 0
+	for _, p := range todo {
+		if err := ctx.Err(); err != nil {
+			return authored, err
+		}
+		if err := store.AuthorPageText(ctx, p.pageID, p.body, p.ocrAt, p.model); err != nil {
 			// Best-effort: log and continue so one bad row doesn't abort the whole backfill.
-			logger.Warn("forestnote: page-text backfill author failed", "page", pageID, "err", err)
+			logger.Warn("forestnote: page-text backfill author failed", "page", p.pageID, "err", err)
 			continue
 		}
 		authored++
 	}
-	return authored, rows.Err()
+	return authored, nil
 }
