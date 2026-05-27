@@ -174,6 +174,58 @@ func TestAuthorOps_OverwritesCallerProvenance(t *testing.T) {
 	}
 }
 
+// Phase 1 round-trip plumbing: a UB-side notebook delete must AUTHOR tombstones
+// (notebook + pages + strokes, deleted_at set) that the relay then carries to a
+// device. This proves the wire path; the actual device apply is a hardware test.
+func TestSoftDeleteNotebook_RelaysTombstones(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	ubSite, _ := s.SiteID(ctx)
+
+	// A device (siteA) creates a notebook with a page and a stroke.
+	if _, err := s.ApplyBatch(ctx, siteA, []Op{
+		nbInFolder(1, 1000, nbA, "NB", "", nil),
+		pageOp(2, 2000, pgA, nbA, 0, nil),
+		strokeOnPage(3, 2010, st1, pgA, nil),
+	}); err != nil {
+		t.Fatalf("device apply: %v", err)
+	}
+
+	// Everything the device authored sits at global seq 1..3.
+	cursorBefore, err := s.LastSeq(ctx)
+	if err != nil {
+		t.Fatalf("last seq: %v", err)
+	}
+
+	if _, err := s.SoftDeleteNotebook(ctx, nbA); err != nil {
+		t.Fatalf("soft-delete: %v", err)
+	}
+
+	// The device pulls everything authored AFTER its own ops: exactly the three
+	// tombstones, all authored by UB, all with deleted_at set.
+	ops, _, _, err := s.OpsSince(ctx, cursorBefore, siteA, 500)
+	if err != nil {
+		t.Fatalf("OpsSince device: %v", err)
+	}
+	byTable := map[string]Op{}
+	for _, op := range ops {
+		if op.SiteID != ubSite {
+			t.Errorf("relayed op authored by %q, want UB %q", op.SiteID, ubSite)
+		}
+		if op.Cols["deleted_at"] == nil {
+			t.Errorf("%s/%s relayed without deleted_at set: %+v", op.Table, op.PK, op.Cols)
+		}
+		byTable[op.Table] = op
+	}
+	if len(ops) != 3 || byTable["notebook"].PK != nbA || byTable["page"].PK != pgA || byTable["stroke"].PK != st1 {
+		t.Fatalf("relayed tombstones = %+v, want one each of notebook/page/stroke", ops)
+	}
+	// The stroke tombstone carries a full row (points round-tripped, not dropped).
+	if _, ok := byTable["stroke"].Cols["points"].(string); !ok {
+		t.Errorf("stroke tombstone missing base64 points: %+v", byTable["stroke"].Cols)
+	}
+}
+
 // A malformed op (missing a known column) is rejected before anything is written.
 func TestAuthorOps_RejectsMalformed(t *testing.T) {
 	s := newTestStore(t)

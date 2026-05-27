@@ -17,9 +17,13 @@
 
 - **Client** — a ForestNote installation (Kotlin, on a Viwoods device). Authors all ops.
   Holds a local SQLite (SQLDelight) database and an outbound oplog.
-- **Server** — one UltraBridge instance (Go). A **relay + mirror**: it ingests client ops,
-  materializes a mirror, and relays ops to the user's other devices. **The server never
-  authors ForestNote ops.** All ops originate on a device; conflict is only device↔device.
+- **Server** — one UltraBridge instance (Go). A **relay + mirror** that is *also* an
+  authoring site: it ingests client ops, materializes a mirror, relays ops to the user's
+  other devices, **and can author its own ops** (e.g. a notebook delete initiated from the UB
+  web UI). UB holds a persistent ULID `site_id` of its own and a monotonic `op_seq` counter,
+  exactly like a device; server-authored ops travel the same wire and merge by the same LWW
+  rule, so conflict is device↔device **and** device↔UB. (Server-authored ops are recorded in
+  the changelog and pulled by every device via the normal relay; the wire is unchanged.)
 - **Single user per instance.** No tenant key, no row-level security — one UB instance
   serves one user's devices. (Multi-instance hosting is a deployment concern, out of scope.)
 
@@ -60,7 +64,7 @@ restoration sets it back to `null`. Both are ordinary upserts resolved by the sa
 Op = {
   "table":   "notebook" | "page" | "stroke",
   "pk":      "<ULID>",       // the row's primary key
-  "site_id": "<ULID>",       // device that authored this op
+  "site_id": "<ULID>",       // the site that authored this op (a device, or UB itself)
   "op_seq":  <int64>,        // per-device monotonic counter
   "wall_ts": <int64 ms UTC>, // device wall clock at authoring time
   "cols":    { ...full row state, including deleted_at }
@@ -247,6 +251,11 @@ Consequences that fall out for free:
 - **Delete / restore:** `deleted_at` is just an LWW column; the latest writer decides
   live-vs-deleted. `delete-then-restore` and `restore-then-delete` converge to the op with
   the greatest key.
+- **Server-authored vs device:** a UB-authored op (e.g. a delete from the web UI) is just an
+  op with UB's `site_id`, so it competes by the same key. A UB delete reliably beats device
+  ops older than it (`ub-delete-beats-older`), but a device edit with a newer `wall_ts` wins
+  and resurrects the row (`ub-delete-then-device-edit`) — the deliberate last-writer-wins
+  ceiling, not special-cased.
 
 ### 5.3 Per-op processing (the apply algorithm)
 

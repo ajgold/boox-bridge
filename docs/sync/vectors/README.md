@@ -102,6 +102,8 @@ Kotlin, not Python.
 | `folder-move` | `parent_folder_id` resolves by greatest key (re-parenting) |
 | `notebook-move-folder` | `folder_id` LWW (notebook moved between folders / to root) |
 | `page-template` | `template` + `template_pitch_mm` set then cleared, LWW |
+| `ub-delete-beats-older` | server-authored delete beats an older device op (UB as an authoring site) |
+| `ub-delete-then-device-edit` | a newer device edit beats a UB delete → row resurrects (the LWW ceiling) |
 
 **Out of scope for vectors:** transport/envelope error handling, per-op `rejected` semantics,
 `accepted_through` contiguity, idempotent resend, and cursor reconciliation are *protocol*

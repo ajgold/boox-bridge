@@ -231,6 +231,36 @@ func (s *Store) AuthorOps(ctx context.Context, ops []Op) ([]TablePK, error) {
 	return changedPages, nil
 }
 
+// --- authoring column helpers: mirror scan values → wire `cols` values ---
+// Authored ops are built in Go but must look exactly like a decoded device op,
+// where JSON numbers arrive as float64 (the col* accessors type-switch on it).
+// So numeric columns become float64, nullable columns become a value or nil.
+
+// wireNum renders a required numeric column; a NULL mirror value (shouldn't occur
+// for device-sourced rows) coalesces to 0 rather than failing validation.
+func wireNum(n sql.NullInt64) any {
+	if n.Valid {
+		return float64(n.Int64)
+	}
+	return float64(0)
+}
+
+// wireNullNum renders a nullable numeric column as float64 or nil.
+func wireNullNum(n sql.NullInt64) any {
+	if n.Valid {
+		return float64(n.Int64)
+	}
+	return nil
+}
+
+// wireNullStr renders a nullable string column as string or nil.
+func wireNullStr(s sql.NullString) any {
+	if s.Valid {
+		return s.String
+	}
+	return nil
+}
+
 // advanceAccepted computes and persists siteID's contiguous accepted_through
 // (spec §4.1): the greatest N such that every op_seq 1..N is durably settled —
 // present in sync_ops (applied or deduped from any call) OR permanently rejected
