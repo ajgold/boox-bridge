@@ -19,6 +19,8 @@ KNOWN = {
     "text_box": {"page_id", "x", "y", "width", "height", "text", "font_name",
                  "font_size", "color", "weight", "border_width", "z",
                  "created_at", "deleted_at"},
+    "page_text_from_server": {"text", "ocr_at", "model", "created_at", "deleted_at"},
+    "page_text_from_client": {"text", "ocr_at", "model", "created_at", "deleted_at"},
 }
 ULID_ALPHABET = set("0123456789ABCDEFGHJKMNPQRSTVWXYZ")
 

@@ -14,6 +14,7 @@ import (
 	"log/slog"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/sysop/ultrabridge/internal/fnpath"
 	"github.com/sysop/ultrabridge/internal/forestrender"
@@ -199,6 +200,18 @@ func (b *Bridge) processPage(ctx context.Context, pagePK string) {
 		}
 	}
 
+	// Push the recognized text down to the device (page_text_from_server). On a page
+	// that OCR'd to nothing (and has no text boxes), tombstone instead so stale text
+	// does not linger on-device. Best-effort: a failure here must not stall the bridge.
+	// model is "" because the narrow OCR interface does not expose one (v1).
+	if body != "" {
+		if err := b.store.AuthorPageText(ctx, pagePK, body, time.Now().UnixMilli(), ""); err != nil {
+			b.logger.Warn("syncbridge: page text author failed", "page", pagePK, "err", err)
+		}
+	} else if err := b.store.AuthorPageTextTombstone(ctx, pagePK); err != nil {
+		b.logger.Warn("syncbridge: page text tombstone failed", "page", pagePK, "err", err)
+	}
+
 	if body != "" && b.deps.Embedder != nil && b.deps.EmbedStore != nil {
 		rag.EmbedAndStorePage(ctx, b.deps.Embedder, b.deps.EmbedStore, path, 0, body, b.deps.EmbedModel, b.logger)
 	}
@@ -229,6 +242,11 @@ func (b *Bridge) dropPage(ctx context.Context, pagePK, path string) {
 		if err := b.deps.EmbedStore.Delete(ctx, path); err != nil {
 			b.logger.Warn("syncbridge: embedding delete failed", "page", pagePK, "err", err)
 		}
+	}
+	// Tombstone the page's recognized-text row so a deleted/blank page stops carrying
+	// OCR text to devices (best-effort, like the index/embedding deletes above).
+	if err := b.store.AuthorPageTextTombstone(ctx, pagePK); err != nil {
+		b.logger.Warn("syncbridge: page text tombstone failed", "page", pagePK, "err", err)
 	}
 }
 

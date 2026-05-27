@@ -107,6 +107,9 @@ Kotlin, not Python.
 | `text-box-basic` | one `text_box` op materializes to a live row (all 14 cols + provenance) |
 | `text-box-delete` | `deleted_at` LWW on a text box: create → delete → restore converges to live |
 | `text-box-lww` | two ops on one `text_box` pk converge to the greater key; deleted winner stays in state |
+| `page-text-basic` | one `page_text_from_server` op materializes to a live row (all 5 cols + provenance) |
+| `page-text-tombstone` | `deleted_at` LWW on a page-text row: a newer op tombstones it (cleared/deleted page) |
+| `page-text-reocr` | re-OCR — a newer non-delete op on the same pk overwrites `text`; `created_at` carries forward |
 
 **Out of scope for vectors:** transport/envelope error handling, per-op `rejected` semantics,
 `accepted_through` contiguity, idempotent resend, and cursor reconciliation are *protocol*

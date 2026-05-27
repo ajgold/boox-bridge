@@ -99,6 +99,19 @@ func (s *Source) Start(ctx context.Context) error {
 	s.bridge = syncbridge.New(s.store, bdeps, logger)
 	s.bridge.Start(ctx)
 	s.syncSvc = syncsvc.New(s.store, s.cfg.BatchLimit, s.bridge, logger)
+
+	// One-shot: push any pre-feature OCR text (already in note_content) down to devices
+	// as page_text_from_server. Runs after Migrate + store construction; idempotent
+	// (skips pages that already have a row), so it's safe on every Start. Off the
+	// startup path so a large catalog doesn't delay the source coming up.
+	go func() {
+		n, err := backfillPageText(ctx, s.db, s.store, logger)
+		if err != nil {
+			logger.Warn("forestnote: page-text backfill failed", "err", err)
+		} else if n > 0 {
+			logger.Info("forestnote: page-text backfill complete", "authored", n)
+		}
+	}()
 	return nil
 }
 

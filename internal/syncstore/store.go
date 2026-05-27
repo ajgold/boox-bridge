@@ -343,6 +343,11 @@ func mergeRow(ctx context.Context, tx *sql.Tx, n Op) (changed bool, pagePK strin
 		var pid string
 		pid, err = upsertTextBox(ctx, tx, n)
 		pagePK = pid
+	case "page_text_from_server", "page_text_from_client":
+		// Recognized-text rows are NOT page render input — leave pagePK empty so they
+		// never enter ChangedPages. (If they did, authoring page text from the bridge
+		// would re-enqueue the page and loop OCR→author→render forever.)
+		err = upsertPageText(ctx, tx, n)
 	}
 	if err != nil {
 		return false, "", err
@@ -565,6 +570,41 @@ func upsertTextBox(ctx context.Context, tx *sql.Tx, n Op) (pageID string, err er
 		   lww_wall_ts=excluded.lww_wall_ts, lww_op_seq=excluded.lww_op_seq, lww_site_id=excluded.lww_site_id`,
 		n.PK, pageID, x, y, width, height, text, fontName, fontSize, color, weight, borderWidth, z, created, del, n.WallTS, n.OpSeq, n.SiteID)
 	return pageID, err
+}
+
+// upsertPageText materializes a page_text_from_server / page_text_from_client op into
+// the matching fn_ table (named by n.Table — both have the identical 5-column shape).
+// pk == the page ULID, so this is a 1:1 per-page row that re-OCR re-authors in place.
+// model is the nullable recognizer column; deleted_at is the nullable tombstone.
+func upsertPageText(ctx context.Context, tx *sql.Tx, n Op) error {
+	text, err := colString(n, "text")
+	if err != nil {
+		return err
+	}
+	ocrAt, err := colInt(n, "ocr_at")
+	if err != nil {
+		return err
+	}
+	model, err := colNullString(n, "model")
+	if err != nil {
+		return err
+	}
+	created, err := colInt(n, "created_at")
+	if err != nil {
+		return err
+	}
+	del, err := colNullInt(n, "deleted_at")
+	if err != nil {
+		return err
+	}
+	_, err = tx.ExecContext(ctx,
+		fmt.Sprintf(`INSERT INTO fn_%s (id, text, ocr_at, model, created_at, deleted_at, lww_wall_ts, lww_op_seq, lww_site_id)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+		 ON CONFLICT(id) DO UPDATE SET text=excluded.text, ocr_at=excluded.ocr_at, model=excluded.model,
+		   created_at=excluded.created_at, deleted_at=excluded.deleted_at,
+		   lww_wall_ts=excluded.lww_wall_ts, lww_op_seq=excluded.lww_op_seq, lww_site_id=excluded.lww_site_id`, n.Table),
+		n.PK, text, ocrAt, model, created, del, n.WallTS, n.OpSeq, n.SiteID)
+	return err
 }
 
 // OpsSince returns changelog ops with seq > cursor authored by some OTHER site,
