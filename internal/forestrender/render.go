@@ -49,6 +49,24 @@ type Stroke struct {
 	Z           int64  // draw order within the page
 }
 
+// TextBox is one renderable text box. The bridge maps a fn_text_box mirror row
+// onto this. Geometry and FontSize are in the SAME virtual-unit space as stroke
+// points (page short axis = 10,000), so the renderer draws them 1:1 alongside the
+// ink with no separate scale. Z is the paint band: 0 = below ink, 1 = above ink.
+type TextBox struct {
+	X, Y, Width, Height int64
+	Text                string
+	FontName            string // tablet basename; not resolvable server-side (see fonts.go)
+	FontSize            int64
+	Color               int64 // packed ARGB (unsigned int64, like Stroke.Color)
+	Weight              int64 // 400 = normal, 700 = bold
+	BorderWidth         int64 // px; 0 = no border
+	Z                   int64 // 0 = below ink, 1 = above ink
+}
+
+// lineSpacing is the wrapped-text line height multiple for box text.
+const lineSpacing = 1.3
+
 // Point is a decoded stroke sample.
 type Point struct{ X, Y, Pressure int32 }
 
@@ -68,10 +86,12 @@ func DecodePoints(b []byte) []Point {
 	return pts
 }
 
-// RenderPage renders strokes (any order; sorted by Z here) onto a white canvas
-// sized to their bounding box plus a margin. An empty/strokeless page yields a
-// small blank white image and no error.
-func RenderPage(strokes []Stroke) (image.Image, error) {
+// RenderPage renders a page's strokes and text boxes onto a white canvas sized to
+// their combined bounding box plus a margin. Strokes and boxes share one virtual
+// coordinate space, so both draw 1:1. Paint order matches the client: below-ink
+// boxes (z==0), then ink (in Z order), then above-ink boxes (z==1). A page with no
+// strokes and no boxes yields a small blank white image and no error.
+func RenderPage(strokes []Stroke, boxes []TextBox) (image.Image, error) {
 	type decoded struct {
 		pts      []Point
 		min, max int64
@@ -86,6 +106,21 @@ func RenderPage(strokes []Stroke) (image.Image, error) {
 	minX, minY := int32(math.MaxInt32), int32(math.MaxInt32)
 	maxX, maxY := int32(math.MinInt32), int32(math.MinInt32)
 	any := false
+	grow := func(x, y int32) {
+		any = true
+		if x < minX {
+			minX = x
+		}
+		if y < minY {
+			minY = y
+		}
+		if x > maxX {
+			maxX = x
+		}
+		if y > maxY {
+			maxY = y
+		}
+	}
 
 	for _, s := range ordered {
 		pts := DecodePoints(s.Points)
@@ -95,20 +130,15 @@ func RenderPage(strokes []Stroke) (image.Image, error) {
 		r, g, b, _ := decodeARGB(int32(s.Color))
 		ds = append(ds, decoded{pts: pts, min: s.PenWidthMin, max: s.PenWidthMax, r: r, g: g, b: b})
 		for _, p := range pts {
-			any = true
-			if p.X < minX {
-				minX = p.X
-			}
-			if p.Y < minY {
-				minY = p.Y
-			}
-			if p.X > maxX {
-				maxX = p.X
-			}
-			if p.Y > maxY {
-				maxY = p.Y
-			}
+			grow(p.X, p.Y)
 		}
+	}
+
+	// Expand the box to include every text box rect, so a box outside the ink
+	// extent — or a page with boxes and no ink at all — still fits on the canvas.
+	for _, b := range boxes {
+		grow(clampI32(b.X), clampI32(b.Y))
+		grow(clampI32(b.X+b.Width), clampI32(b.Y+b.Height))
 	}
 
 	if !any {
@@ -128,6 +158,13 @@ func RenderPage(strokes []Stroke) (image.Image, error) {
 	dc.SetLineCap(gg.LineCapRound)
 	dc.SetLineJoin(gg.LineJoinRound)
 
+	// Below-ink text boxes first.
+	for _, b := range boxes {
+		if b.Z == 0 {
+			drawBox(dc, b, offX, offY)
+		}
+	}
+
 	for _, d := range ds {
 		dc.SetRGB(d.r, d.g, d.b)
 		for i := 0; i < len(d.pts)-1; i++ {
@@ -139,7 +176,52 @@ func RenderPage(strokes []Stroke) (image.Image, error) {
 			dc.Stroke()
 		}
 	}
+
+	// Above-ink text boxes last.
+	for _, b := range boxes {
+		if b.Z != 0 {
+			drawBox(dc, b, offX, offY)
+		}
+	}
 	return dc.Image(), nil
+}
+
+// drawBox paints one text box: an optional border rect, then the wrapped text
+// clipped to the box (overflow is retained in the data, not drawn — matching the
+// client). Colors come from the packed ARGB exactly as strokes decode it.
+func drawBox(dc *gg.Context, b TextBox, offX, offY float64) {
+	x := float64(b.X) + offX
+	y := float64(b.Y) + offY
+	w, h := float64(b.Width), float64(b.Height)
+	r, g, bl, a := decodeARGB(int32(b.Color))
+
+	if b.BorderWidth > 0 {
+		dc.SetRGBA(r, g, bl, a)
+		dc.SetLineWidth(float64(b.BorderWidth))
+		dc.DrawRectangle(x, y, w, h)
+		dc.Stroke()
+	}
+	if b.Text == "" {
+		return
+	}
+	dc.DrawRectangle(x, y, w, h)
+	dc.Clip()
+	dc.SetRGBA(r, g, bl, a)
+	dc.SetFontFace(faceFor(b.Weight, b.FontSize))
+	dc.DrawStringWrapped(b.Text, x, y, 0, 0, w, lineSpacing, gg.AlignLeft)
+	dc.ResetClip()
+}
+
+// clampI32 narrows an int64 box coordinate to int32 (the bounding-box accumulator
+// type), saturating rather than overflowing on absurd input.
+func clampI32(v int64) int32 {
+	if v > math.MaxInt32 {
+		return math.MaxInt32
+	}
+	if v < math.MinInt32 {
+		return math.MinInt32
+	}
+	return int32(v)
 }
 
 // pressureToWidth maps pressure (0..pressureMax) linearly into [min, max] px,

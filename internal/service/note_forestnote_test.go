@@ -18,6 +18,7 @@ type fakeFNReader struct {
 	notebooks   []syncstore.NotebookRow
 	pages       map[string][]syncstore.PageRef
 	strokes     map[string][]syncstore.StrokeData
+	textBoxes   map[string][]syncstore.TextBoxData
 	meta        map[string]syncstore.NotebookRow
 	live        map[string]bool                       // page id → live; absent ⇒ not live (missing/deleted)
 	contents    map[string]struct{ f []syncstore.FolderRow; n []syncstore.NotebookRow } // folderID → direct children
@@ -90,6 +91,9 @@ func (f *fakeFNReader) LivePage(_ context.Context, pg string) (string, bool, err
 }
 func (f *fakeFNReader) LivePageStrokes(_ context.Context, pg string) ([]syncstore.StrokeData, error) {
 	return f.strokes[pg], nil
+}
+func (f *fakeFNReader) LivePageTextBoxes(_ context.Context, pg string) ([]syncstore.TextBoxData, error) {
+	return f.textBoxes[pg], nil
 }
 
 func twoPointStroke() syncstore.StrokeData {

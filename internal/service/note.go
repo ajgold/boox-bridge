@@ -88,6 +88,7 @@ type ForestNoteReader interface {
 	NotebookMeta(ctx context.Context, notebookID string) (syncstore.NotebookRow, error)
 	LivePage(ctx context.Context, pagePK string) (notebookID string, live bool, err error)
 	LivePageStrokes(ctx context.Context, pagePK string) ([]syncstore.StrokeData, error)
+	LivePageTextBoxes(ctx context.Context, pagePK string) ([]syncstore.TextBoxData, error)
 	ListFolderContents(ctx context.Context, folderID string) ([]syncstore.FolderRow, []syncstore.NotebookRow, error)
 	FolderPath(ctx context.Context, folderID string) ([]syncstore.FolderRow, error)
 	SoftDeleteNotebook(ctx context.Context, notebookID string) ([]string, error)
@@ -530,7 +531,11 @@ func (s *noteService) renderForestNotePage(ctx context.Context, path string) (io
 	if err != nil {
 		return nil, "", fmt.Errorf("load page strokes: %w", err)
 	}
-	img, err := forestrender.RenderPage(syncbridge.MapStrokes(strokes))
+	boxes, err := s.fnReader.LivePageTextBoxes(ctx, pageID)
+	if err != nil {
+		return nil, "", fmt.Errorf("load page text boxes: %w", err)
+	}
+	img, err := forestrender.RenderPage(syncbridge.MapStrokes(strokes), syncbridge.MapTextBoxes(boxes))
 	if err != nil {
 		return nil, "", fmt.Errorf("render forestnote page: %w", err)
 	}

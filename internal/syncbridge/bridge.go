@@ -143,13 +143,18 @@ func (b *Bridge) processPage(ctx context.Context, pagePK string) {
 		b.logger.Error("syncbridge: stroke read failed", "page", pagePK, "err", err)
 		return
 	}
-	if len(strokes) == 0 {
-		// All strokes erased → the page is now blank; drop it.
+	boxes, err := b.store.LivePageTextBoxes(ctx, pagePK)
+	if err != nil {
+		b.logger.Error("syncbridge: text box read failed", "page", pagePK, "err", err)
+		return
+	}
+	if len(strokes) == 0 && len(boxes) == 0 {
+		// All strokes erased and no text boxes → the page is now blank; drop it.
 		b.dropPage(ctx, pagePK, path)
 		return
 	}
 
-	img, err := forestrender.RenderPage(MapStrokes(strokes))
+	img, err := forestrender.RenderPage(MapStrokes(strokes), MapTextBoxes(boxes))
 	if err != nil {
 		b.logger.Error("syncbridge: render failed", "page", pagePK, "err", err)
 		return
@@ -210,6 +215,21 @@ func MapStrokes(sd []syncstore.StrokeData) []forestrender.Stroke {
 		out[i] = forestrender.Stroke{
 			Color: s.Color, PenWidthMin: s.PenWidthMin, PenWidthMax: s.PenWidthMax,
 			Points: s.Points, Z: s.Z,
+		}
+	}
+	return out
+}
+
+// MapTextBoxes maps stored mirror text boxes onto forestrender's input. Exported
+// for the same reason as MapStrokes: the note service's on-the-fly renderer reuses
+// this exact mapping so the two paths can't drift.
+func MapTextBoxes(td []syncstore.TextBoxData) []forestrender.TextBox {
+	out := make([]forestrender.TextBox, len(td))
+	for i, t := range td {
+		out[i] = forestrender.TextBox{
+			X: t.X, Y: t.Y, Width: t.Width, Height: t.Height,
+			Text: t.Text, FontName: t.FontName, FontSize: t.FontSize,
+			Color: t.Color, Weight: t.Weight, BorderWidth: t.BorderWidth, Z: t.Z,
 		}
 	}
 	return out
