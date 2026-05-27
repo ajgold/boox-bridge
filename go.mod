@@ -7,7 +7,7 @@ require (
 	github.com/emersion/go-webdav v0.7.0
 	github.com/fogleman/gg v1.2.0
 	github.com/fsnotify/fsnotify v1.9.0
-	github.com/go-sql-driver/mysql v1.9.3
+	github.com/go-pdf/fpdf v0.9.0
 	github.com/gorilla/websocket v1.5.3
 	github.com/jdkruzr/go-sn v0.0.0-20260322033813-b2a5f8c9e7e4
 	github.com/modelcontextprotocol/go-sdk v1.4.0
@@ -19,7 +19,6 @@ require (
 )
 
 require (
-	filippo.io/edwards25519 v1.1.0 // indirect
 	github.com/dustin/go-humanize v1.0.1 // indirect
 	github.com/golang/freetype v0.0.0-20170609003504-e2365dfdc4a0 // indirect
 	github.com/google/jsonschema-go v0.4.2 // indirect

@@ -1,0 +1,37 @@
+{{define "_fn_note_row"}}
+{{$e := .Entry}}
+<tr id="{{ fileRowID (or $e.Path $e.ID) }}">
+  <td>
+    {{if $e.IsFolder}}📁
+      <a href="/files/forestnote?folder={{$e.ID}}" hx-get="/files/forestnote?folder={{$e.ID}}" hx-target="#main-content" hx-push-url="true">{{$e.Name}}</a>
+    {{else}}📓
+      <a href="/files/forestnote?notebook={{$e.ID}}" hx-get="/files/forestnote?notebook={{$e.ID}}" hx-target="#main-content" hx-push-url="true">{{$e.Name}}</a>
+    {{end}}
+  </td>
+  <td>{{if $e.IsFolder}}folder{{else}}notebook{{end}}</td>
+  <td>{{if not $e.IsFolder}}{{$e.PageCount}}{{end}}</td>
+  <td>{{formatTimestamp $e.CreatedAt}}</td>
+  <td>{{formatTimestamp $e.ModifiedAt}}</td>
+  <td>
+    {{if not $e.IsFolder}}
+      {{if eq $e.Status "indexed"}}<span class="badge badge-done">indexed</span>
+      {{else if eq $e.Status "partial"}}<span class="badge badge-progress">partial</span>
+      {{else}}<span class="badge badge-unprocessed">blank</span>{{end}}
+    {{end}}
+  </td>
+  <td>
+    {{if not $e.IsFolder}}
+    <div style="display:inline-flex; gap: 0.25rem;">
+      <a class="btn-small" href="/files/forestnote/export?notebook={{$e.ID}}">Download</a>
+      <button type="button" class="btn-small"
+              hx-post="/files/forestnote/reprocess?notebook={{$e.ID}}" hx-swap="none">Re-OCR</button>
+      <button type="button" class="btn-small" style="background: var(--status-text-failed);"
+              hx-post="/files/forestnote/delete"
+              hx-vals='{"notebook": "{{$e.ID}}", "back": "{{.FolderID}}"}'
+              hx-target="closest tr" hx-swap="outerHTML"
+              hx-confirm="Delete “{{$e.Name}}” from UltraBridge? This removes it from your library and search index. If it still exists on your device and you edit it again, it will reappear on the next sync — to delete permanently, delete it on the device.">Delete</button>
+    </div>
+    {{end}}
+  </td>
+</tr>
+{{end}}

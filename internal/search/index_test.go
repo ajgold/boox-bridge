@@ -41,6 +41,38 @@ func TestSearch_IndexAndQuery(t *testing.T) {
 	}
 }
 
+// GetContentByPrefix returns only the rows matching the LIKE pattern, keyed by
+// path, and excludes unrelated paths.
+func TestGetContentByPrefix(t *testing.T) {
+	idx := openTestIndex(t)
+	ctx := context.Background()
+	nb := "forestnote://NB1/"
+	docs := []NoteDocument{
+		{Path: nb + "PG1", Page: 0, BodyText: "alpha", Source: "forestnote"},
+		{Path: nb + "PG2", Page: 0, BodyText: "beta", Source: "forestnote"},
+		{Path: "forestnote://NB2/PG9", Page: 0, BodyText: "other notebook"},
+		{Path: "/supernote/foo.note", Page: 0, BodyText: "unrelated"},
+	}
+	for _, d := range docs {
+		if err := idx.Index(ctx, d); err != nil {
+			t.Fatalf("Index %s: %v", d.Path, err)
+		}
+	}
+	got, err := idx.GetContentByPrefix(ctx, nb+"%")
+	if err != nil {
+		t.Fatalf("GetContentByPrefix: %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("want 2 docs, got %d: %v", len(got), got)
+	}
+	if got[nb+"PG1"].BodyText != "alpha" || got[nb+"PG2"].BodyText != "beta" {
+		t.Errorf("unexpected bodies: %+v", got)
+	}
+	if _, ok := got["forestnote://NB2/PG9"]; ok {
+		t.Error("NB2 page leaked into NB1 prefix results")
+	}
+}
+
 // Rename repoints FTS entries to the new path; the old path stops matching and
 // the new path matches.
 func TestSearch_Rename(t *testing.T) {

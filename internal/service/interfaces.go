@@ -93,6 +93,42 @@ type ForestNoteNotebook struct {
 	Path       string `json:"path"`
 	FolderID   string `json:"folder_id"`
 	PageCount  int    `json:"page_count"`
+	CreatedAt  int64  `json:"created_at"`  // ms UTC, 0 = unset
+	ModifiedAt int64  `json:"modified_at"` // ms UTC, derived last-activity
+}
+
+// ForestNoteEntry is one row in the Supernote-style ForestNote Files table: a
+// folder (IsFolder) the user can navigate into, or a notebook they can open.
+// For a folder, ID is the folder id (the ?folder= navigation target) and Path/
+// PageCount/Status are empty/zero. For a notebook, ID is the notebook id and
+// Path is its forestnote:// URI.
+type ForestNoteEntry struct {
+	IsFolder   bool   `json:"is_folder"`
+	ID         string `json:"id"`
+	Name       string `json:"name"`
+	Path       string `json:"path,omitempty"`
+	PageCount  int    `json:"page_count"`
+	CreatedAt  int64  `json:"created_at"`
+	ModifiedAt int64  `json:"modified_at"`
+	Status     string `json:"status,omitempty"` // notebook only: blank|partial|indexed
+}
+
+// ForestNoteCrumb is one hop in the folder breadcrumb trail (root→current).
+type ForestNoteCrumb struct {
+	FolderID string `json:"folder_id"`
+	Name     string `json:"name"`
+}
+
+// ForestNoteNotebookDetail is the enriched click-through view of one notebook:
+// header metadata plus its pages, each carrying OCR body text for display.
+type ForestNoteNotebookDetail struct {
+	NotebookID string           `json:"notebook_id"`
+	Name       string           `json:"name"`
+	CreatedAt  int64            `json:"created_at"`
+	ModifiedAt int64            `json:"modified_at"`
+	PageCount  int              `json:"page_count"`
+	FolderPath []string         `json:"folder_path"` // ancestor folder names root→leaf
+	Pages      []ForestNotePage `json:"pages"`
 }
 
 // ForestNoteTreeNode is a folder in the ForestNote browse tree, holding its child
@@ -107,9 +143,11 @@ type ForestNoteTreeNode struct {
 // ForestNotePage is one renderable page of a notebook. Path is the render target
 // (forestnote://{notebook_id}/{page_id}); Ordinal is its display position.
 type ForestNotePage struct {
-	PageID  string `json:"page_id"`
-	Path    string `json:"path"`
-	Ordinal int    `json:"ordinal"`
+	PageID   string `json:"page_id"`
+	Path     string `json:"path"`
+	Ordinal  int    `json:"ordinal"`
+	BodyText string `json:"body_text,omitempty"` // OCR text from the search index
+	Source   string `json:"source,omitempty"`    // OCR provenance (e.g. "forestnote")
 }
 
 // EmbeddingJobStatus represents the background processing state.
@@ -180,10 +218,26 @@ type NoteService interface {
 	// SetForestNoteReader wires the syncstore mirror for browsing/rendering
 	// synced ForestNote notebooks.
 	SetForestNoteReader(r ForestNoteReader)
+	// SetForestNoteReprocessor wires the source's re-OCR trigger (re-enqueues a
+	// notebook's pages onto the sync bridge). Nil-safe.
+	SetForestNoteReprocessor(r ForestNoteReprocessor)
 
 	// ForestNote (synced device source, no filesystem)
 	ListForestNoteTree(ctx context.Context) (roots []ForestNoteTreeNode, unfiled []ForestNoteNotebook, err error)
 	ListForestNotePages(ctx context.Context, notebookID string) (name string, pages []ForestNotePage, err error)
+	// ListForestNoteFolder lists the direct contents of a folder (empty = root) as
+	// a Supernote-style table, with the breadcrumb trail to that folder.
+	ListForestNoteFolder(ctx context.Context, folderID, sortField, order string) (crumbs []ForestNoteCrumb, entries []ForestNoteEntry, err error)
+	// GetForestNoteNotebookDetail returns a notebook's header metadata + pages
+	// (with OCR body text) for the click-through detail view.
+	GetForestNoteNotebookDetail(ctx context.Context, notebookID string) (ForestNoteNotebookDetail, error)
+	// DeleteForestNoteNotebook soft-deletes a notebook in the mirror and de-indexes
+	// its pages (UB-local; see syncstore.SoftDeleteNotebook for resurrection notes).
+	DeleteForestNoteNotebook(ctx context.Context, notebookID string) error
+	// ReprocessForestNoteNotebook re-enqueues a notebook's pages for re-OCR/re-index.
+	ReprocessForestNoteNotebook(ctx context.Context, notebookID string) error
+	// ExportForestNoteNotebookPDF renders a notebook's live pages to a single PDF.
+	ExportForestNoteNotebookPDF(ctx context.Context, notebookID string) (stream io.ReadCloser, filename string, err error)
 
 	// Source Presence
 	HasSupernoteSource() bool

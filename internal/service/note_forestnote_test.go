@@ -4,21 +4,74 @@ import (
 	"context"
 	"encoding/binary"
 	"io"
+	"log/slog"
 	"testing"
 
+	"github.com/sysop/ultrabridge/internal/search"
 	"github.com/sysop/ultrabridge/internal/syncstore"
 )
 
 // fakeFNReader is a canned ForestNoteReader for testing the note service's
 // ForestNote surfacing without a real syncstore.
 type fakeFNReader struct {
-	folders   []syncstore.FolderRow
-	notebooks []syncstore.NotebookRow
-	pages     map[string][]syncstore.PageRef
-	strokes   map[string][]syncstore.StrokeData
-	meta      map[string]syncstore.NotebookRow
-	live      map[string]bool // page id → live; absent ⇒ not live (missing/deleted)
+	folders     []syncstore.FolderRow
+	notebooks   []syncstore.NotebookRow
+	pages       map[string][]syncstore.PageRef
+	strokes     map[string][]syncstore.StrokeData
+	meta        map[string]syncstore.NotebookRow
+	live        map[string]bool                       // page id → live; absent ⇒ not live (missing/deleted)
+	contents    map[string]struct{ f []syncstore.FolderRow; n []syncstore.NotebookRow } // folderID → direct children
+	folderPaths map[string][]syncstore.FolderRow      // folderID → ancestor chain
+	deletePages map[string][]string                   // notebookID → page IDs to return from SoftDeleteNotebook
+	deleted     []string                              // notebookIDs passed to SoftDeleteNotebook
 }
+
+func (f *fakeFNReader) ListFolderContents(_ context.Context, id string) ([]syncstore.FolderRow, []syncstore.NotebookRow, error) {
+	c := f.contents[id]
+	return c.f, c.n, nil
+}
+func (f *fakeFNReader) FolderPath(_ context.Context, id string) ([]syncstore.FolderRow, error) {
+	return f.folderPaths[id], nil
+}
+func (f *fakeFNReader) SoftDeleteNotebook(_ context.Context, nb string) ([]string, error) {
+	f.deleted = append(f.deleted, nb)
+	return f.deletePages[nb], nil
+}
+func (f *fakeFNReader) LiveNotebookPageIDs(_ context.Context, nb string) ([]string, error) {
+	var ids []string
+	for _, p := range f.pages[nb] {
+		ids = append(ids, p.ID)
+	}
+	return ids, nil
+}
+
+// fakeSearchIndex satisfies search.SearchIndex; only GetContentByPrefix and
+// Delete carry behavior, the rest are no-ops.
+type fakeSearchIndex struct {
+	byPrefix map[string]search.NoteDocument // note_path → doc
+	deleted  []string                       // paths passed to Delete
+}
+
+func (f *fakeSearchIndex) Index(context.Context, search.NoteDocument) error { return nil }
+func (f *fakeSearchIndex) Search(context.Context, search.SearchQuery) ([]search.SearchResult, error) {
+	return nil, nil
+}
+func (f *fakeSearchIndex) Delete(_ context.Context, path string) error {
+	f.deleted = append(f.deleted, path)
+	return nil
+}
+func (f *fakeSearchIndex) IndexPage(context.Context, string, int, string, string, string, string) error {
+	return nil
+}
+func (f *fakeSearchIndex) GetContent(context.Context, string) ([]search.NoteDocument, error) {
+	return nil, nil
+}
+func (f *fakeSearchIndex) GetContentByPrefix(_ context.Context, _ string) (map[string]search.NoteDocument, error) {
+	return f.byPrefix, nil
+}
+func (f *fakeSearchIndex) ListFolders(context.Context) ([]string, error) { return nil, nil }
+
+var _ search.SearchIndex = (*fakeSearchIndex)(nil)
 
 func (f *fakeFNReader) ListFolders(context.Context) ([]syncstore.FolderRow, error) {
 	return f.folders, nil
@@ -120,6 +173,148 @@ func TestListForestNotePages_BuildsPaths(t *testing.T) {
 		t.Errorf("pages = %+v", pages)
 	}
 }
+
+type fakeReprocessor struct {
+	called []string
+	err    error
+}
+
+func (f *fakeReprocessor) ReprocessNotebook(_ context.Context, nb string) error {
+	f.called = append(f.called, nb)
+	return f.err
+}
+
+func TestListForestNoteFolder_EntriesAndStatus(t *testing.T) {
+	r := &fakeFNReader{
+		contents: map[string]struct {
+			f []syncstore.FolderRow
+			n []syncstore.NotebookRow
+		}{
+			"": {
+				f: []syncstore.FolderRow{{ID: "f1", Name: "Sub", CreatedAt: 100, ModifiedAt: 200}},
+				n: []syncstore.NotebookRow{
+					{ID: "nbFull", Name: "Full", PageCount: 2, CreatedAt: 10, ModifiedAt: 50},
+					{ID: "nbPartial", Name: "Partial", PageCount: 2},
+					{ID: "nbBlank", Name: "Blank", PageCount: 0},
+				},
+			},
+		},
+		folderPaths: map[string][]syncstore.FolderRow{},
+	}
+	si := &fakeSearchIndex{byPrefix: map[string]search.NoteDocument{
+		"forestnote://nbFull/p1":    {Path: "forestnote://nbFull/p1", BodyText: "a"},
+		"forestnote://nbFull/p2":    {Path: "forestnote://nbFull/p2", BodyText: "b"},
+		"forestnote://nbPartial/p1": {Path: "forestnote://nbPartial/p1", BodyText: "only one"},
+		"forestnote://nbPartial/p2": {Path: "forestnote://nbPartial/p2", BodyText: ""}, // empty → not counted
+	}}
+	s := &noteService{fnReader: r, searchIndex: si, logger: slog.Default()}
+
+	crumbs, entries, err := s.ListForestNoteFolder(context.Background(), "", "name", "asc")
+	if err != nil {
+		t.Fatalf("list folder: %v", err)
+	}
+	if len(crumbs) != 0 {
+		t.Errorf("root crumbs = %+v, want none", crumbs)
+	}
+	// Folder first, then notebooks by name asc: Sub(folder), Blank, Full, Partial.
+	if len(entries) != 4 || !entries[0].IsFolder || entries[0].ID != "f1" {
+		t.Fatalf("entries = %+v, want folder f1 first", entries)
+	}
+	byID := map[string]ForestNoteEntry{}
+	for _, e := range entries {
+		byID[e.ID] = e
+	}
+	if byID["nbFull"].Status != "indexed" {
+		t.Errorf("nbFull status = %q, want indexed", byID["nbFull"].Status)
+	}
+	if byID["nbPartial"].Status != "partial" {
+		t.Errorf("nbPartial status = %q, want partial", byID["nbPartial"].Status)
+	}
+	if byID["nbBlank"].Status != "blank" {
+		t.Errorf("nbBlank status = %q, want blank", byID["nbBlank"].Status)
+	}
+	if byID["nbFull"].Path != "forestnote://nbFull" {
+		t.Errorf("nbFull path = %q", byID["nbFull"].Path)
+	}
+}
+
+func TestGetForestNoteNotebookDetail_JoinsOCRAndFolderPath(t *testing.T) {
+	r := &fakeFNReader{
+		meta:  map[string]syncstore.NotebookRow{"nbA": {ID: "nbA", Name: "Journal", FolderID: "f2", CreatedAt: 10, ModifiedAt: 99}},
+		pages: map[string][]syncstore.PageRef{"nbA": {{ID: "pgA"}, {ID: "pgB"}}},
+		folderPaths: map[string][]syncstore.FolderRow{
+			"f2": {{ID: "f1", Name: "Parent"}, {ID: "f2", Name: "Child"}},
+		},
+	}
+	si := &fakeSearchIndex{byPrefix: map[string]search.NoteDocument{
+		"forestnote://nbA/pgA": {Path: "forestnote://nbA/pgA", BodyText: "hello", Source: "forestnote"},
+	}}
+	s := &noteService{fnReader: r, searchIndex: si, logger: slog.Default()}
+
+	d, err := s.GetForestNoteNotebookDetail(context.Background(), "nbA")
+	if err != nil {
+		t.Fatalf("detail: %v", err)
+	}
+	if d.Name != "Journal" || d.CreatedAt != 10 || d.ModifiedAt != 99 || d.PageCount != 2 {
+		t.Errorf("header = %+v", d)
+	}
+	if len(d.FolderPath) != 2 || d.FolderPath[0] != "Parent" || d.FolderPath[1] != "Child" {
+		t.Errorf("folder path = %+v, want [Parent Child]", d.FolderPath)
+	}
+	if d.Pages[0].BodyText != "hello" || d.Pages[0].Source != "forestnote" {
+		t.Errorf("page 0 OCR not joined: %+v", d.Pages[0])
+	}
+	if d.Pages[1].BodyText != "" {
+		t.Errorf("page 1 should have no OCR text, got %q", d.Pages[1].BodyText)
+	}
+}
+
+func TestDeleteForestNoteNotebook_SoftDeleteThenDeindex(t *testing.T) {
+	r := &fakeFNReader{deletePages: map[string][]string{"nbA": {"pgA", "pgB"}}}
+	si := &fakeSearchIndex{}
+	emb := &fakeEmbedIndex{}
+	s := &noteService{fnReader: r, searchIndex: si, embedIndex: emb, logger: slog.Default()}
+
+	if err := s.DeleteForestNoteNotebook(context.Background(), "nbA"); err != nil {
+		t.Fatalf("delete: %v", err)
+	}
+	if len(r.deleted) != 1 || r.deleted[0] != "nbA" {
+		t.Errorf("soft-delete calls = %+v", r.deleted)
+	}
+	want := []string{"forestnote://nbA/pgA", "forestnote://nbA/pgB"}
+	if len(si.deleted) != 2 || si.deleted[0] != want[0] || si.deleted[1] != want[1] {
+		t.Errorf("search de-index = %+v, want %+v", si.deleted, want)
+	}
+	if len(emb.deleted) != 2 {
+		t.Errorf("embedding de-index = %+v, want 2", emb.deleted)
+	}
+}
+
+func TestReprocessForestNoteNotebook_DelegatesAndNilSafe(t *testing.T) {
+	// Nil reprocessor → error, not panic.
+	s := &noteService{logger: slog.Default()}
+	if err := s.ReprocessForestNoteNotebook(context.Background(), "nbA"); err == nil {
+		t.Error("want error when reprocessor not wired")
+	}
+	// Wired → delegates.
+	rp := &fakeReprocessor{}
+	s.SetForestNoteReprocessor(rp)
+	if err := s.ReprocessForestNoteNotebook(context.Background(), "nbA"); err != nil {
+		t.Fatalf("reprocess: %v", err)
+	}
+	if len(rp.called) != 1 || rp.called[0] != "nbA" {
+		t.Errorf("reprocessor calls = %+v", rp.called)
+	}
+}
+
+// fakeEmbedIndex tracks Delete calls.
+type fakeEmbedIndex struct{ deleted []string }
+
+func (f *fakeEmbedIndex) Delete(_ context.Context, path string) error {
+	f.deleted = append(f.deleted, path)
+	return nil
+}
+func (f *fakeEmbedIndex) Rename(context.Context, string, string) error { return nil }
 
 func TestBuildForestNoteTree_NestingAndUnfiled(t *testing.T) {
 	folders := []syncstore.FolderRow{

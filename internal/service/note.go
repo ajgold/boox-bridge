@@ -18,6 +18,7 @@ import (
 	"github.com/sysop/ultrabridge/internal/appconfig"
 	"github.com/sysop/ultrabridge/internal/booxpipeline"
 	"github.com/sysop/ultrabridge/internal/fnpath"
+	"github.com/sysop/ultrabridge/internal/forestpdf"
 	"github.com/sysop/ultrabridge/internal/forestrender"
 	"github.com/sysop/ultrabridge/internal/notedb"
 	"github.com/sysop/ultrabridge/internal/notestore"
@@ -87,6 +88,17 @@ type ForestNoteReader interface {
 	NotebookMeta(ctx context.Context, notebookID string) (syncstore.NotebookRow, error)
 	LivePage(ctx context.Context, pagePK string) (notebookID string, live bool, err error)
 	LivePageStrokes(ctx context.Context, pagePK string) ([]syncstore.StrokeData, error)
+	ListFolderContents(ctx context.Context, folderID string) ([]syncstore.FolderRow, []syncstore.NotebookRow, error)
+	FolderPath(ctx context.Context, folderID string) ([]syncstore.FolderRow, error)
+	SoftDeleteNotebook(ctx context.Context, notebookID string) ([]string, error)
+	LiveNotebookPageIDs(ctx context.Context, notebookID string) ([]string, error)
+}
+
+// ForestNoteReprocessor re-enqueues a notebook's live pages onto the sync bridge
+// for a fresh render → OCR → index → embed pass. *forestnote.Source satisfies it.
+// Set via SetForestNoteReprocessor only when a ForestNote source is active.
+type ForestNoteReprocessor interface {
+	ReprocessNotebook(ctx context.Context, notebookID string) error
 }
 
 type noteService struct {
@@ -96,8 +108,9 @@ type noteService struct {
 	booxImporter  BooxImporter
 	booxProc      BooxProcessor
 	searchIndex   search.SearchIndex
-	embedIndex    EmbedIndex       // optional; set via SetEmbedIndex
-	fnReader      ForestNoteReader // optional; set via SetForestNoteReader
+	embedIndex    EmbedIndex            // optional; set via SetEmbedIndex
+	fnReader      ForestNoteReader      // optional; set via SetForestNoteReader
+	fnReprocessor ForestNoteReprocessor // optional; set via SetForestNoteReprocessor
 	scanner       FileScanner
 	noteDB        *sql.DB // for settings
 	booxCachePath string
@@ -144,6 +157,10 @@ func (s *noteService) SetEmbedIndex(d EmbedIndex) { s.embedIndex = d }
 // synced ForestNote notebooks and render pages on the fly. Nil-safe in the same
 // way as SetEmbedIndex; keeps NewNoteService's signature untouched.
 func (s *noteService) SetForestNoteReader(r ForestNoteReader) { s.fnReader = r }
+
+// SetForestNoteReprocessor wires the source's re-OCR trigger. Nil-safe in the
+// same way as SetForestNoteReader.
+func (s *noteService) SetForestNoteReprocessor(r ForestNoteReprocessor) { s.fnReprocessor = r }
 
 // HasForestNoteSource reports whether a ForestNote source is active (a reader is
 // wired). Lets the web layer render an empty state instead of failing.
@@ -566,6 +583,259 @@ func (s *noteService) ListForestNotePages(ctx context.Context, notebookID string
 		}
 	}
 	return meta.Name, pages, nil
+}
+
+// ListForestNoteFolder lists the direct children of folderID (empty = root) as a
+// Supernote-style table (folders first, then notebooks), plus the breadcrumb
+// trail to that folder. Each notebook carries a derived index Status. Returns
+// empty results (no error) when no ForestNote source is wired.
+func (s *noteService) ListForestNoteFolder(ctx context.Context, folderID, sortField, order string) ([]ForestNoteCrumb, []ForestNoteEntry, error) {
+	if s.fnReader == nil {
+		return nil, nil, nil
+	}
+	folders, notebooks, err := s.fnReader.ListFolderContents(ctx, folderID)
+	if err != nil {
+		return nil, nil, fmt.Errorf("folder contents: %w", err)
+	}
+	chain, err := s.fnReader.FolderPath(ctx, folderID)
+	if err != nil {
+		return nil, nil, fmt.Errorf("folder path: %w", err)
+	}
+	crumbs := make([]ForestNoteCrumb, len(chain))
+	for i, f := range chain {
+		crumbs[i] = ForestNoteCrumb{FolderID: f.ID, Name: f.Name}
+	}
+
+	// Per-notebook index coverage for the Status column. One bulk read over all
+	// ForestNote content (one row per indexed page); cheap at current scale.
+	indexed := s.forestNoteIndexedCounts(ctx)
+
+	folderEntries := make([]ForestNoteEntry, 0, len(folders))
+	for _, f := range folders {
+		folderEntries = append(folderEntries, ForestNoteEntry{
+			IsFolder: true, ID: f.ID, Name: f.Name,
+			CreatedAt: f.CreatedAt, ModifiedAt: f.ModifiedAt,
+		})
+	}
+	nbEntries := make([]ForestNoteEntry, 0, len(notebooks))
+	for _, n := range notebooks {
+		nbEntries = append(nbEntries, ForestNoteEntry{
+			ID: n.ID, Name: n.Name, Path: fnpath.Notebook(n.ID),
+			PageCount: n.PageCount, CreatedAt: n.CreatedAt, ModifiedAt: n.ModifiedAt,
+			Status: forestNoteStatus(n.PageCount, indexed[n.ID]),
+		})
+	}
+	sortForestNoteEntries(folderEntries, sortField, order)
+	sortForestNoteEntries(nbEntries, sortField, order)
+
+	// Folders always sort ahead of notebooks (mirrors Supernote's dirs-first table).
+	entries := append(folderEntries, nbEntries...)
+	return crumbs, entries, nil
+}
+
+// forestNoteIndexedCounts returns, per notebook id, the number of its pages that
+// have non-empty OCR body text in the search index. Best-effort: a read error
+// yields an empty map (Status then reports "blank"/"partial" conservatively).
+func (s *noteService) forestNoteIndexedCounts(ctx context.Context) map[string]int {
+	counts := map[string]int{}
+	if s.searchIndex == nil {
+		return counts
+	}
+	docs, err := s.searchIndex.GetContentByPrefix(ctx, fnpath.Scheme+"%")
+	if err != nil {
+		s.logger.Warn("forestnote index coverage read failed", "error", err)
+		return counts
+	}
+	for path, d := range docs {
+		if strings.TrimSpace(d.BodyText) != "" {
+			counts[fnpath.NotebookID(path)]++
+		}
+	}
+	return counts
+}
+
+// forestNoteStatus classifies a notebook's index coverage for the table badge.
+func forestNoteStatus(pageCount, indexedPages int) string {
+	switch {
+	case pageCount == 0:
+		return "blank"
+	case indexedPages >= pageCount:
+		return "indexed"
+	default:
+		return "partial"
+	}
+}
+
+// sortForestNoteEntries sorts a single group (folders or notebooks) in place by
+// the requested field. Default is name ascending; an unknown field falls back to
+// name. order is "asc" or "desc".
+func sortForestNoteEntries(entries []ForestNoteEntry, sortField, order string) {
+	desc := order == "desc"
+	less := func(i, j int) bool {
+		switch sortField {
+		case "created":
+			return entries[i].CreatedAt < entries[j].CreatedAt
+		case "modified":
+			return entries[i].ModifiedAt < entries[j].ModifiedAt
+		case "pages":
+			return entries[i].PageCount < entries[j].PageCount
+		default:
+			return strings.ToLower(entries[i].Name) < strings.ToLower(entries[j].Name)
+		}
+	}
+	sort.SliceStable(entries, func(i, j int) bool {
+		if desc {
+			return less(j, i)
+		}
+		return less(i, j)
+	})
+}
+
+// GetForestNoteNotebookDetail returns a notebook's header metadata and its live
+// pages enriched with OCR body text (one bulk index read keyed on the notebook's
+// page-path prefix) for the click-through detail view.
+func (s *noteService) GetForestNoteNotebookDetail(ctx context.Context, notebookID string) (ForestNoteNotebookDetail, error) {
+	if s.fnReader == nil {
+		return ForestNoteNotebookDetail{}, fmt.Errorf("forestnote source not available")
+	}
+	meta, err := s.fnReader.NotebookMeta(ctx, notebookID)
+	if err != nil {
+		return ForestNoteNotebookDetail{}, err
+	}
+	refs, err := s.fnReader.NotebookPages(ctx, notebookID)
+	if err != nil {
+		return ForestNoteNotebookDetail{}, fmt.Errorf("notebook pages: %w", err)
+	}
+
+	// OCR text for every page in one query (each page is indexed under its own
+	// forestnote://{nb}/{page} path).
+	var content map[string]search.NoteDocument
+	if s.searchIndex != nil {
+		content, err = s.searchIndex.GetContentByPrefix(ctx, fnpath.Notebook(notebookID)+"/%")
+		if err != nil {
+			s.logger.Warn("forestnote detail content read failed", "notebook", notebookID, "error", err)
+		}
+	}
+
+	pages := make([]ForestNotePage, len(refs))
+	for i, r := range refs {
+		path := fnpath.Page(notebookID, r.ID)
+		p := ForestNotePage{PageID: r.ID, Path: path, Ordinal: i}
+		if doc, ok := content[path]; ok {
+			p.BodyText = doc.BodyText
+			p.Source = doc.Source
+		}
+		pages[i] = p
+	}
+
+	var folderPath []string
+	if meta.FolderID != "" {
+		if chain, err := s.fnReader.FolderPath(ctx, meta.FolderID); err == nil {
+			for _, f := range chain {
+				folderPath = append(folderPath, f.Name)
+			}
+		}
+	}
+
+	return ForestNoteNotebookDetail{
+		NotebookID: meta.ID, Name: meta.Name,
+		CreatedAt: meta.CreatedAt, ModifiedAt: meta.ModifiedAt,
+		PageCount: len(pages), FolderPath: folderPath, Pages: pages,
+	}, nil
+}
+
+// DeleteForestNoteNotebook soft-deletes a notebook (authoritative) and then
+// de-indexes each of its pages from search + embeddings (best-effort). It is a
+// UB-local hide, not a device tombstone — see syncstore.SoftDeleteNotebook.
+func (s *noteService) DeleteForestNoteNotebook(ctx context.Context, notebookID string) error {
+	if s.fnReader == nil {
+		return fmt.Errorf("forestnote source not available")
+	}
+	pageIDs, err := s.fnReader.SoftDeleteNotebook(ctx, notebookID)
+	if err != nil {
+		return fmt.Errorf("soft-delete notebook: %w", err)
+	}
+	for _, pid := range pageIDs {
+		path := fnpath.Page(notebookID, pid)
+		if s.searchIndex != nil {
+			if err := s.searchIndex.Delete(ctx, path); err != nil {
+				s.logger.Warn("forestnote de-index failed", "path", path, "error", err)
+			}
+		}
+		if s.embedIndex != nil {
+			if err := s.embedIndex.Delete(ctx, path); err != nil {
+				s.logger.Warn("forestnote embedding delete failed", "path", path, "error", err)
+			}
+		}
+	}
+	return nil
+}
+
+// ReprocessForestNoteNotebook re-enqueues a notebook's pages for re-OCR/re-index.
+func (s *noteService) ReprocessForestNoteNotebook(ctx context.Context, notebookID string) error {
+	if s.fnReprocessor == nil {
+		return fmt.Errorf("forestnote reprocessing not available")
+	}
+	return s.fnReprocessor.ReprocessNotebook(ctx, notebookID)
+}
+
+// ExportForestNoteNotebookPDF renders a notebook's live pages to JPEG (reusing
+// the on-the-fly stroke renderer) and assembles them into a single PDF.
+func (s *noteService) ExportForestNoteNotebookPDF(ctx context.Context, notebookID string) (io.ReadCloser, string, error) {
+	if s.fnReader == nil {
+		return nil, "", fmt.Errorf("forestnote source not available")
+	}
+	meta, err := s.fnReader.NotebookMeta(ctx, notebookID)
+	if err != nil {
+		return nil, "", err
+	}
+	refs, err := s.fnReader.NotebookPages(ctx, notebookID)
+	if err != nil {
+		return nil, "", fmt.Errorf("notebook pages: %w", err)
+	}
+	if len(refs) == 0 {
+		return nil, "", fmt.Errorf("notebook has no pages to export")
+	}
+
+	pages := make([][]byte, 0, len(refs))
+	for _, r := range refs {
+		stream, _, err := s.renderForestNotePage(ctx, fnpath.Page(notebookID, r.ID))
+		if err != nil {
+			return nil, "", fmt.Errorf("render page %s: %w", r.ID, err)
+		}
+		data, err := io.ReadAll(stream)
+		stream.Close()
+		if err != nil {
+			return nil, "", fmt.Errorf("read page %s: %w", r.ID, err)
+		}
+		pages = append(pages, data)
+	}
+
+	var buf bytes.Buffer
+	if err := forestpdf.AssemblePDF(pages, &buf); err != nil {
+		return nil, "", fmt.Errorf("assemble pdf: %w", err)
+	}
+	return io.NopCloser(&buf), sanitizeFilename(meta.Name, notebookID) + ".pdf", nil
+}
+
+// sanitizeFilename keeps a notebook name safe for a Content-Disposition filename,
+// falling back to the notebook id when the name is empty or all-unsafe.
+func sanitizeFilename(name, fallback string) string {
+	var b strings.Builder
+	for _, r := range name {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9',
+			r == ' ', r == '-', r == '_', r == '.':
+			b.WriteRune(r)
+		default:
+			b.WriteRune('_')
+		}
+	}
+	out := strings.TrimSpace(b.String())
+	if out == "" || out == "." {
+		return fallback
+	}
+	return out
 }
 
 // buildForestNoteTree assembles the folder tree (pure). Notebooks whose folder_id
