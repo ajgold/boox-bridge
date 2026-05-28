@@ -27,9 +27,10 @@
 - **Single user per instance.** No tenant key, no row-level security — one UB instance
   serves one user's devices. (Multi-instance hosting is a deployment concern, out of scope.)
 
-The unit of replication is the **row**. Five tables sync: `folder`, `notebook`, `page`,
-`stroke`, and `text_box`. Merge is **row-level last-writer-wins (LWW)** under a deterministic
-total order (§5).
+The unit of replication is the **row**. Seven tables sync: `folder`, `notebook`, `page`,
+`stroke`, `text_box`, and the per-page recognized-text pair `page_text_from_server` /
+`page_text_from_client` (the latter reserved). Merge is **row-level last-writer-wins (LWW)**
+under a deterministic total order (§5).
 
 ---
 
@@ -146,6 +147,23 @@ clips, data does not).
 | `created_at` | int64 ms UTC | |
 | `deleted_at` | int64 ms UTC \| null | `null` = live |
 
+**`page_text_from_server`** and **`page_text_from_client`** (schema v3) — per-page recognized
+text, carried over the same changelog so the device can persist (and later search) it. Both
+have the **identical** shape; the row pk **is the page ULID** (1:1 with `page`), so a re-OCR
+re-authors the same row and converges by LWW. `page_text_from_server` is authored **only by
+UB** (the OCR result pushed down to devices); `page_text_from_client` is **reserved** for a
+future on-device-recognition feature — its columns are counted in the v3 hash now so adopting
+client-authoring needs no further schema bump, but in v3 **nothing authors it** on either side.
+The device MUST NOT author either table (a device-authored empty `text` would clobber the
+server's text by recency); both are single-writer, so there is no cross-writer hazard.
+| col | type | notes |
+|---|---|---|
+| `text` | string | the recognized text (flat, per-page; `""` allowed) |
+| `ocr_at` | int64 ms UTC | last recognition time |
+| `model` | string \| null | recognizer model / source; `null` = unspecified |
+| `created_at` | int64 ms UTC | first recognition time |
+| `deleted_at` | int64 ms UTC \| null | `null` = live; set when the page is deleted/cleared |
+
 ### 3.2 Unknown columns are ignored (forward-compat)
 
 When materializing, the server **drops** any key in `cols` not listed for that table. A v2
@@ -163,7 +181,7 @@ row and the merge therefore consider only the known column set. (Conformance vec
 // Request
 {
   "protocol_version": 1,
-  "schema_hash": "bc1953e2b85e766a572329e7023b4582b768094b4d27e28a632e21bedb776874",
+  "schema_hash": "724411eb845ad3487393a77cb5559690e69332c35fdb5ee3e85c1767bf71f3fe",
   "site_id": "<ULID>",
   "cursor": <int64>,     // last global seq this device has applied (0 = never synced)
   "ops": [ Op, ... ]     // pending local ops, in op_seq order
@@ -310,34 +328,37 @@ For each incoming op, in order:
 `schema_hash` is the lowercase hex SHA-256 of a canonical schema string. The string is built
 deterministically (no implementation-order dependence):
 
-- Tables in fixed order: `folder`, `notebook`, `page`, `stroke`, `text_box`.
+- Tables in fixed order (alphabetical): `folder`, `notebook`, `page`,
+  `page_text_from_client`, `page_text_from_server`, `stroke`, `text_box`.
 - Within each table, column names sorted **ascending ASCII** (alphabetical).
 - Format: `table:col,col,...` per table, tables joined by `;`, no spaces, no trailing newline.
 
-The **v2** canonical string (current — adds `text_box`) is:
+The **v3** canonical string (current — adds `page_text_from_client` + `page_text_from_server`) is:
 
 ```
-folder:created_at,deleted_at,name,parent_folder_id,sort_order;notebook:created_at,deleted_at,folder_id,name,sort_order;page:created_at,deleted_at,notebook_id,sort_order,template,template_pitch_mm;stroke:color,created_at,deleted_at,page_id,pen_width_max,pen_width_min,points,z;text_box:border_width,color,created_at,deleted_at,font_name,font_size,height,page_id,text,weight,width,x,y,z
+folder:created_at,deleted_at,name,parent_folder_id,sort_order;notebook:created_at,deleted_at,folder_id,name,sort_order;page:created_at,deleted_at,notebook_id,sort_order,template,template_pitch_mm;page_text_from_client:created_at,deleted_at,model,ocr_at,text;page_text_from_server:created_at,deleted_at,model,ocr_at,text;stroke:color,created_at,deleted_at,page_id,pen_width_max,pen_width_min,points,z;text_box:border_width,color,created_at,deleted_at,font_name,font_size,height,page_id,text,weight,width,x,y,z
 ```
 
 ```
-schema_hash (v2) = sha256(utf8(canonical string))
-                 = bc1953e2b85e766a572329e7023b4582b768094b4d27e28a632e21bedb776874
+schema_hash (v3) = sha256(utf8(canonical string))
+                 = 724411eb845ad3487393a77cb5559690e69332c35fdb5ee3e85c1767bf71f3fe
 ```
 
-The prior **v1** string (no `text_box`) hashed to
-`9b807dc88cd0465d171892bb17e65ad94190eda058594e207caad3368eb1f2fe`.
+The prior **v2** string (no `page_text_*`) hashed to
+`bc1953e2b85e766a572329e7023b4582b768094b4d27e28a632e21bedb776874`; the **v1** string (no
+`text_box`) hashed to `9b807dc88cd0465d171892bb17e65ad94190eda058594e207caad3368eb1f2fe`.
 
 The server rejects a request whose `schema_hash` it does not recognize (`409`, §7) so a
 client on an unknown schema cannot corrupt the mirror. (Only the column **set** is hashed —
 identity/envelope fields `pk`, `site_id`, `op_seq`, `wall_ts` are not part of it.)
 
 **Grace window (multi-hash).** The server accepts a *set* of known-good hashes, not a single
-value: during a schema rollout it admits both the new (v2) and the immediately prior (v1)
-hash, so a not-yet-updated client keeps syncing while the matching client release ships. A v1
-client never sends `text_box` ops, so admitting it cannot corrupt the v2 mirror. Once all
-clients have updated, the prior hash is retired from the accepted set. This generalizes to
-every future bump (add the new hash, keep the prior one for one release, then drop it).
+value: during a schema rollout it admits both the new (v3) and the immediately prior (v2)
+hash, so a not-yet-updated client keeps syncing while the matching client release ships. A v2
+client never sends `page_text_*` ops and silently ignores the ones it is relayed (§3.2), so
+admitting it cannot corrupt the v3 mirror. v1 (pre-`text_box`) is **retired** — its grace
+window closed with the text_box rollout. This generalizes to every future bump (add the new
+hash, keep the prior one for one release, then drop it).
 
 ---
 

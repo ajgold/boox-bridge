@@ -30,12 +30,19 @@ var knownCols = map[string][]string{
 	"folder":   {"created_at", "deleted_at", "name", "parent_folder_id", "sort_order"},
 	"notebook": {"created_at", "deleted_at", "folder_id", "name", "sort_order"},
 	"page":     {"created_at", "deleted_at", "notebook_id", "sort_order", "template", "template_pitch_mm"},
-	"stroke":   {"color", "created_at", "deleted_at", "page_id", "pen_width_max", "pen_width_min", "points", "z"},
-	"text_box": {"border_width", "color", "created_at", "deleted_at", "font_name", "font_size", "height", "page_id", "text", "weight", "width", "x", "y", "z"},
+	// page_text_from_server / page_text_from_client carry per-page recognized text
+	// (schema v3). Identical shape; pk == the page ULID. _from_server is server-authored
+	// (UB's OCR pushed to the device); _from_client is RESERVED for future on-device
+	// recognition (columns counted in the hash now so adopting it needs no second bump).
+	"page_text_from_client": {"created_at", "deleted_at", "model", "ocr_at", "text"},
+	"page_text_from_server": {"created_at", "deleted_at", "model", "ocr_at", "text"},
+	"stroke":                {"color", "created_at", "deleted_at", "page_id", "pen_width_max", "pen_width_min", "points", "z"},
+	"text_box":              {"border_width", "color", "created_at", "deleted_at", "font_name", "font_size", "height", "page_id", "text", "weight", "width", "x", "y", "z"},
 }
 
-// tableOrder is the fixed table order for the canonical schema string (§6).
-var tableOrder = []string{"folder", "notebook", "page", "stroke", "text_box"}
+// tableOrder is the fixed table order for the canonical schema string (§6). It is
+// kept alphabetical, so the page_text_* tables sit between "page" and "stroke".
+var tableOrder = []string{"folder", "notebook", "page", "page_text_from_client", "page_text_from_server", "stroke", "text_box"}
 
 // canonicalSchema builds the deterministic schema string (spec §6): tables in
 // fixed order, columns alphabetical within each table, `table:col,col;table:...`,
@@ -63,16 +70,24 @@ func SchemaHash() string {
 // rollout grace window (see AcceptsSchemaHash). Keep this literal forever.
 const schemaHashV1 = "9b807dc88cd0465d171892bb17e65ad94190eda058594e207caad3368eb1f2fe"
 
+// schemaHashV2 is the FROZEN prior schema hash (folder/notebook/page/stroke/text_box,
+// before the page_text_* tables). Like schemaHashV1 it is hardcoded, not derived: once
+// knownCols gains the page_text_* tables, SchemaHash() yields v3, but a not-yet-updated
+// v2 client must keep syncing during the rollout grace window. Keep this literal forever.
+const schemaHashV2 = "bc1953e2b85e766a572329e7023b4582b768094b4d27e28a632e21bedb776874"
+
 // AcceptsSchemaHash reports whether the server will sync with a client advertising
-// hash h. It accepts the current schema (SchemaHash) AND the frozen prior schema
-// (schemaHashV1), so a not-yet-updated v1 client keeps syncing while the matching
-// client release rolls out — instead of a hard cutover that 409s every old client
-// the instant the server adds text_box. A v1 client never sends text_box ops, so
-// admitting it is safe; once all clients update, drop schemaHashV1 from this set.
-// Generalizes to every future schema bump: add the new hash, keep the prior one
-// for one release, then retire it.
+// hash h. It accepts the current schema (SchemaHash, now v3) AND the frozen prior
+// schema (schemaHashV2), so a not-yet-updated v2 client keeps syncing while the
+// matching client release rolls out — instead of a hard cutover that 409s every old
+// client the instant the server adds the page_text_* tables. A v2 client never sends
+// page_text_* ops and silently ignores the ones it is relayed, so admitting it is safe;
+// once all clients update, drop schemaHashV2 from this set. v1 (pre-text_box) is retired:
+// its grace window closed with the text_box rollout, so a v1 client must already be on v2.
+// Generalizes to every future schema bump: add the new hash, keep the prior one for one
+// release, then retire it.
 func AcceptsSchemaHash(h string) bool {
-	return h == SchemaHash() || h == schemaHashV1
+	return h == SchemaHash() || h == schemaHashV2
 }
 
 const ulidAlphabet = "0123456789ABCDEFGHJKMNPQRSTVWXYZ" // Crockford base32, uppercase (§2.1)

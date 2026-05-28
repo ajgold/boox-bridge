@@ -330,6 +330,15 @@ func (s *Store) SoftDeleteNotebook(ctx context.Context, notebookID string) ([]st
 		return nil, fmt.Errorf("iterate strokes: %w", err)
 	}
 
+	// Each deleted page's recognized-text row → tombstone, so the page's OCR text
+	// leaves the device alongside its content (not just the page header).
+	for _, id := range pageIDs {
+		ops = append(ops, Op{
+			Table: "page_text_from_server", PK: id,
+			Cols: pageTextCols("", 0, now, "", &now),
+		})
+	}
+
 	if _, err := s.AuthorOps(ctx, ops); err != nil {
 		return nil, fmt.Errorf("author notebook delete: %w", err)
 	}

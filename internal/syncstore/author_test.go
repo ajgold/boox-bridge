@@ -2,6 +2,7 @@ package syncstore
 
 import (
 	"context"
+	"database/sql"
 	"testing"
 )
 
@@ -175,8 +176,9 @@ func TestAuthorOps_OverwritesCallerProvenance(t *testing.T) {
 }
 
 // Phase 1 round-trip plumbing: a UB-side notebook delete must AUTHOR tombstones
-// (notebook + pages + strokes, deleted_at set) that the relay then carries to a
-// device. This proves the wire path; the actual device apply is a hardware test.
+// (notebook + pages + strokes + each page's recognized-text row, deleted_at set)
+// that the relay then carries to a device. This proves the wire path; the actual
+// device apply is a hardware test.
 func TestSoftDeleteNotebook_RelaysTombstones(t *testing.T) {
 	s := newTestStore(t)
 	ctx := context.Background()
@@ -201,8 +203,9 @@ func TestSoftDeleteNotebook_RelaysTombstones(t *testing.T) {
 		t.Fatalf("soft-delete: %v", err)
 	}
 
-	// The device pulls everything authored AFTER its own ops: exactly the three
-	// tombstones, all authored by UB, all with deleted_at set.
+	// The device pulls everything authored AFTER its own ops: exactly the four
+	// tombstones (notebook, page, stroke, and the page's recognized-text row), all
+	// authored by UB, all with deleted_at set.
 	ops, _, _, err := s.OpsSince(ctx, cursorBefore, siteA, 500)
 	if err != nil {
 		t.Fatalf("OpsSince device: %v", err)
@@ -217,8 +220,9 @@ func TestSoftDeleteNotebook_RelaysTombstones(t *testing.T) {
 		}
 		byTable[op.Table] = op
 	}
-	if len(ops) != 3 || byTable["notebook"].PK != nbA || byTable["page"].PK != pgA || byTable["stroke"].PK != st1 {
-		t.Fatalf("relayed tombstones = %+v, want one each of notebook/page/stroke", ops)
+	if len(ops) != 4 || byTable["notebook"].PK != nbA || byTable["page"].PK != pgA ||
+		byTable["stroke"].PK != st1 || byTable["page_text_from_server"].PK != pgA {
+		t.Fatalf("relayed tombstones = %+v, want one each of notebook/page/stroke/page_text_from_server", ops)
 	}
 	// The stroke tombstone carries a full row (points round-tripped, not dropped).
 	if _, ok := byTable["stroke"].Cols["points"].(string); !ok {
@@ -348,5 +352,79 @@ func TestAuthorOps_RejectsMalformed(t *testing.T) {
 	s.db.QueryRowContext(ctx, `SELECT last_op_seq FROM sync_site WHERE id = 1`).Scan(&last)
 	if nOps != 0 || last != 0 {
 		t.Errorf("after rejected batch: sync_ops=%d last_op_seq=%d, want 0/0 (rolled back)", nOps, last)
+	}
+}
+
+// AuthorPageText must author a page_text_from_server op (UB site_id), materialize the
+// mirror row, and relay it; a later re-OCR overwrites the text by LWW (op_seq breaks the
+// same-ms wall_ts tie); a tombstone sets deleted_at. And authoring page text must NOT
+// report any changed pages — that empty result is what keeps the bridge from re-OCRing
+// in a loop (page_text rows are not page render input).
+func TestAuthorPageText_AuthorMaterializeRelayReocrTombstone(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	ubSite, _ := s.SiteID(ctx)
+
+	if err := s.AuthorPageText(ctx, pgA, "first pass", 1000, "modelX"); err != nil {
+		t.Fatalf("author page text: %v", err)
+	}
+
+	readRow := func() (text, model string, del sql.NullInt64) {
+		var m sql.NullString
+		if err := s.db.QueryRowContext(ctx,
+			`SELECT text, model, deleted_at FROM fn_page_text_from_server WHERE id = ?`, pgA).
+			Scan(&text, &m, &del); err != nil {
+			t.Fatalf("read page-text row: %v", err)
+		}
+		return text, m.String, del
+	}
+
+	if text, model, del := readRow(); text != "first pass" || model != "modelX" || del.Valid {
+		t.Errorf("after author: row=(%q,%q,deleted=%v), want first pass/modelX/live", text, model, del.Valid)
+	}
+
+	// Relayed to a device under UB's site_id, live (deleted_at null).
+	ops, _, _, err := s.OpsSince(ctx, 0, siteA, 500)
+	if err != nil {
+		t.Fatalf("OpsSince: %v", err)
+	}
+	if len(ops) != 1 || ops[0].Table != "page_text_from_server" || ops[0].PK != pgA || ops[0].SiteID != ubSite {
+		t.Fatalf("relayed = %+v, want one page_text_from_server op for pgA by UB", ops)
+	}
+	if ops[0].Cols["deleted_at"] != nil || ops[0].Cols["text"] != "first pass" {
+		t.Errorf("relayed cols = %+v, want live text 'first pass'", ops[0].Cols)
+	}
+
+	// Re-OCR: a second author on the same page wins (higher op_seq) and overwrites.
+	if err := s.AuthorPageText(ctx, pgA, "second pass", 2000, "modelY"); err != nil {
+		t.Fatalf("re-author page text: %v", err)
+	}
+	if text, model, del := readRow(); text != "second pass" || model != "modelY" || del.Valid {
+		t.Errorf("after re-OCR: row=(%q,%q,deleted=%v), want second pass/modelY/live", text, model, del.Valid)
+	}
+
+	// Tombstone sets deleted_at.
+	if err := s.AuthorPageTextTombstone(ctx, pgA); err != nil {
+		t.Fatalf("tombstone page text: %v", err)
+	}
+	if _, _, del := readRow(); !del.Valid {
+		t.Errorf("after tombstone: deleted_at must be set")
+	}
+}
+
+// Loop-safety contract: authoring a page_text op returns NO changed pages, so the bridge
+// is never re-enqueued for the page whose text was just authored.
+func TestAuthorPageText_ReportsNoChangedPages(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	changed, err := s.AuthorOps(ctx, []Op{{
+		Table: "page_text_from_server", PK: pgA,
+		Cols:  pageTextCols("hi", 1000, 1000, "m", nil),
+	}})
+	if err != nil {
+		t.Fatalf("author ops: %v", err)
+	}
+	if len(changed) != 0 {
+		t.Errorf("page_text author reported changed pages %+v, want none (loop-safety)", changed)
 	}
 }

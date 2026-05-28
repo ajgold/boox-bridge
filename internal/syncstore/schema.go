@@ -129,6 +129,36 @@ func Migrate(ctx context.Context, db *sql.DB) error {
 			lww_op_seq   INTEGER NOT NULL,
 			lww_site_id  TEXT    NOT NULL
 		)`,
+		// fn_page_text_from_server / fn_page_text_from_client carry per-page recognized
+		// text (schema v3). pk == the page ULID (1:1 with fn_page), so re-OCR
+		// re-authors the SAME row and converges by LWW. _from_server is authored only
+		// by UB (the OCR result pushed down to the device); _from_client is RESERVED
+		// for a future on-device-recognition feature — its columns are baked into the
+		// v3 hash now so adopting client-authoring needs no second schema bump, but
+		// nothing authors it yet. No FK on the page (row-level LWW), no secondary index
+		// (the only lookup is by the PK, which IS the page id).
+		`CREATE TABLE IF NOT EXISTS fn_page_text_from_server (
+			id          TEXT PRIMARY KEY,
+			text        TEXT,
+			ocr_at      INTEGER,
+			model       TEXT,
+			created_at  INTEGER,
+			deleted_at  INTEGER,
+			lww_wall_ts INTEGER NOT NULL,
+			lww_op_seq  INTEGER NOT NULL,
+			lww_site_id TEXT    NOT NULL
+		)`,
+		`CREATE TABLE IF NOT EXISTS fn_page_text_from_client (
+			id          TEXT PRIMARY KEY,
+			text        TEXT,
+			ocr_at      INTEGER,
+			model       TEXT,
+			created_at  INTEGER,
+			deleted_at  INTEGER,
+			lww_wall_ts INTEGER NOT NULL,
+			lww_op_seq  INTEGER NOT NULL,
+			lww_site_id TEXT    NOT NULL
+		)`,
 		`CREATE INDEX IF NOT EXISTS idx_fn_page_nb ON fn_page(notebook_id)`,
 		`CREATE INDEX IF NOT EXISTS idx_fn_stroke_pg ON fn_stroke(page_id, z)`,
 		`CREATE INDEX IF NOT EXISTS idx_fn_text_box_page ON fn_text_box(page_id, z)`,
