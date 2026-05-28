@@ -16,3 +16,7 @@ __pycache__/
 
 # playwright MCP scratch output
 .playwright-mcp/
+
+# local Claude Code settings (the .claude/projects memory files ARE tracked)
+.claude/settings.json
+.claude/settings.local.json
