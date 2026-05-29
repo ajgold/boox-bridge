@@ -2,7 +2,9 @@ package web
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -510,4 +512,91 @@ func TestAuthMiddlewareInstallsIdentity(t *testing.T) {
 	if observed.Method != "bearer" || observed.Label != "test-token" {
 		t.Errorf("identity not propagated: %+v", observed)
 	}
+}
+
+
+// TestAPIv1PurgeDeleted exercises the hard-purge endpoint: default 30-day
+// cutoff when no query param, explicit ?older_than_days=N override, and
+// the rejection of malformed/zero/negative values. We use the mock's
+// purgeDeletedFn hook so we can observe the days that reach the service —
+// the in-memory mock doesn't carry timestamps.
+func TestAPIv1PurgeDeleted(t *testing.T) {
+	t.Run("default cutoff is 30 days", func(t *testing.T) {
+		h := newTestHandler()
+		tasks := h.tasks.(*mockTaskService)
+		var observedDays int
+		tasks.purgeDeletedFn = func(ctx context.Context, days int) (int64, error) {
+			observedDays = days
+			return 7, nil
+		}
+
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/tasks/purge-deleted", nil)
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, req)
+
+		if w.Code != http.StatusOK {
+			t.Fatalf("status=%d, want 200; body=%s", w.Code, w.Body.String())
+		}
+		if observedDays != 30 {
+			t.Errorf("default days: got %d, want 30", observedDays)
+		}
+		var body struct {
+			Deleted int64 `json:"deleted"`
+		}
+		if err := json.NewDecoder(w.Body).Decode(&body); err != nil {
+			t.Fatalf("decode body: %v", err)
+		}
+		if body.Deleted != 7 {
+			t.Errorf("deleted: got %d, want 7", body.Deleted)
+		}
+	})
+
+	t.Run("explicit older_than_days is honored", func(t *testing.T) {
+		h := newTestHandler()
+		tasks := h.tasks.(*mockTaskService)
+		var observedDays int
+		tasks.purgeDeletedFn = func(ctx context.Context, days int) (int64, error) {
+			observedDays = days
+			return 1500, nil
+		}
+
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/tasks/purge-deleted?older_than_days=7", nil)
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, req)
+
+		if w.Code != http.StatusOK {
+			t.Fatalf("status=%d, want 200", w.Code)
+		}
+		if observedDays != 7 {
+			t.Errorf("explicit days: got %d, want 7", observedDays)
+		}
+	})
+
+	t.Run("rejects zero, negative, and non-integer days", func(t *testing.T) {
+		for _, raw := range []string{"0", "-1", "abc", "1.5"} {
+			h := newTestHandler()
+			req := httptest.NewRequest(http.MethodPost,
+				"/api/v1/tasks/purge-deleted?older_than_days="+raw, nil)
+			w := httptest.NewRecorder()
+			h.ServeHTTP(w, req)
+			if w.Code != http.StatusBadRequest {
+				t.Errorf("raw=%q: status=%d, want 400", raw, w.Code)
+			}
+		}
+	})
+
+	t.Run("service error surfaces as 500", func(t *testing.T) {
+		h := newTestHandler()
+		tasks := h.tasks.(*mockTaskService)
+		tasks.purgeDeletedFn = func(ctx context.Context, days int) (int64, error) {
+			return 0, errors.New("disk full")
+		}
+
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/tasks/purge-deleted", nil)
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, req)
+		if w.Code != http.StatusInternalServerError {
+			t.Errorf("status=%d, want 500; body=%s", w.Code, w.Body.String())
+		}
+	})
 }

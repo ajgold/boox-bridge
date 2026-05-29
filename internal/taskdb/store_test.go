@@ -643,4 +643,105 @@ func TestMigrate_AddsForestNoteColumnsToExistingDB(t *testing.T) {
 	}
 }
 
+// TestStore_HardDeleteOlderThan_RespectsAgeAndDeletedFlag confirms the
+// hard-purge only touches rows that are both soft-deleted AND older than
+// the cutoff. Non-deleted rows survive regardless of age; recent ghosts
+// survive regardless of deletion. This is the operation that finally
+// reclaims rows — every other "delete" path tombstones — so its predicate
+// has to be exactly right.
+func TestStore_HardDeleteOlderThan_RespectsAgeAndDeletedFlag(t *testing.T) {
+	store := openTestStore(t)
+	ctx := context.Background()
+
+	now := time.Now().UnixMilli()
+	dayMs := int64(24 * 60 * 60 * 1000)
+
+	// Four rows covering the matrix:
+	//   (a) live + recent          → must survive (live)
+	//   (b) live + ancient         → must survive (live)
+	//   (c) deleted + recent       → must survive (within window)
+	//   (d) deleted + ancient      → must be removed
+	rows := []struct {
+		id           string
+		isDeleted    string
+		lastModified int64
+	}{
+		{"a-live-recent", "N", now - 1*dayMs},
+		{"b-live-ancient", "N", now - 90*dayMs},
+		{"c-deleted-recent", "Y", now - 5*dayMs},
+		{"d-deleted-ancient", "Y", now - 60*dayMs},
+	}
+	for _, r := range rows {
+		_, err := store.db.ExecContext(ctx, `INSERT INTO tasks
+			(task_id, title, status, is_deleted, last_modified, created_at, updated_at, is_reminder_on)
+			VALUES (?, ?, 'needsAction', ?, ?, ?, ?, 'N')`,
+			r.id, "row "+r.id, r.isDeleted, r.lastModified, now, now)
+		if err != nil {
+			t.Fatalf("insert %s: %v", r.id, err)
+		}
+	}
+
+	// Cutoff 30 days ago: only "d-deleted-ancient" matches both predicates.
+	cutoff := now - 30*dayMs
+	removed, err := store.HardDeleteOlderThan(ctx, cutoff)
+	if err != nil {
+		t.Fatalf("HardDeleteOlderThan: %v", err)
+	}
+	if removed != 1 {
+		t.Errorf("removed: got %d, want 1", removed)
+	}
+
+	// Confirm survivors are physically present (querying including deleted).
+	survivors, err := store.ListIncludingDeleted(ctx)
+	if err != nil {
+		t.Fatalf("ListIncludingDeleted: %v", err)
+	}
+	got := map[string]bool{}
+	for _, t := range survivors {
+		got[t.TaskID] = true
+	}
+	for _, want := range []string{"a-live-recent", "b-live-ancient", "c-deleted-recent"} {
+		if !got[want] {
+			t.Errorf("expected survivor %q to be present, missing", want)
+		}
+	}
+	if got["d-deleted-ancient"] {
+		t.Errorf("expected %q to be hard-deleted, still present", "d-deleted-ancient")
+	}
+}
+
+// TestStore_HardDeleteOlderThan_NoMatchesReturnsZero covers the no-op case:
+// the call should succeed and report zero rows when nothing meets the
+// predicate. Confirms the operation is safe to schedule unconditionally.
+func TestStore_HardDeleteOlderThan_NoMatchesReturnsZero(t *testing.T) {
+	store := openTestStore(t)
+	ctx := context.Background()
+	now := time.Now().UnixMilli()
+
+	// One live, one recently-deleted — neither qualifies for a 30-day purge.
+	_, err := store.db.ExecContext(ctx, `INSERT INTO tasks
+		(task_id, title, status, is_deleted, last_modified, created_at, updated_at, is_reminder_on)
+		VALUES ('live', 'live', 'needsAction', 'N', ?, ?, ?, 'N')`,
+		now, now, now)
+	if err != nil {
+		t.Fatalf("insert live: %v", err)
+	}
+	_, err = store.db.ExecContext(ctx, `INSERT INTO tasks
+		(task_id, title, status, is_deleted, last_modified, created_at, updated_at, is_reminder_on)
+		VALUES ('recent-ghost', 'gone', 'needsAction', 'Y', ?, ?, ?, 'N')`,
+		now-int64(60*60*1000), now, now) // deleted 1h ago
+	if err != nil {
+		t.Fatalf("insert recent-ghost: %v", err)
+	}
+
+	cutoff := now - int64(30*24*60*60*1000)
+	removed, err := store.HardDeleteOlderThan(ctx, cutoff)
+	if err != nil {
+		t.Fatalf("HardDeleteOlderThan: %v", err)
+	}
+	if removed != 0 {
+		t.Errorf("removed: got %d, want 0", removed)
+	}
+}
+
 

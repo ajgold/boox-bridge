@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -42,6 +43,7 @@ func (h *Handler) RegisterAPIv1() {
 	h.mux.HandleFunc("GET /api/v1/tasks", h.handleV1ListTasks)
 	h.mux.HandleFunc("POST /api/v1/tasks", h.handleV1CreateTask)
 	h.mux.HandleFunc("POST /api/v1/tasks/purge-completed", h.handleV1PurgeCompleted)
+	h.mux.HandleFunc("POST /api/v1/tasks/purge-deleted", h.handleV1PurgeDeleted)
 	h.mux.HandleFunc("GET /api/v1/tasks/{id}", h.handleV1GetTask)
 	h.mux.HandleFunc("PATCH /api/v1/tasks/{id}", h.handleV1UpdateTask)
 	h.mux.HandleFunc("POST /api/v1/tasks/{id}/complete", h.handleV1CompleteTask)
@@ -263,6 +265,37 @@ func (h *Handler) handleV1PurgeCompleted(w http.ResponseWriter, r *http.Request)
 	}
 	h.auditMutation(r, "purge_completed")
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// purgeDeletedDefaultDays is the safety-window default when no
+// ?older_than_days= is provided. Long enough that recently-deleted rows
+// aren't surprise-cleared, short enough that the backlog doesn't grow
+// unbounded. Callers wanting a different window pass it explicitly.
+const purgeDeletedDefaultDays = 30
+
+// handleV1PurgeDeleted permanently removes soft-deleted tasks whose
+// last_modified is older than ?older_than_days=N (default 30). Returns 200
+// with {"deleted": N}. This is irreversible. Days must be > 0 — pass an
+// explicit small value (e.g. 1) to aggressively reap, never 0 to mean "all".
+func (h *Handler) handleV1PurgeDeleted(w http.ResponseWriter, r *http.Request) {
+	days := purgeDeletedDefaultDays
+	if raw := r.URL.Query().Get("older_than_days"); raw != "" {
+		n, err := strconv.Atoi(raw)
+		if err != nil || n <= 0 {
+			apiError(w, http.StatusBadRequest, "older_than_days must be a positive integer")
+			return
+		}
+		days = n
+	}
+
+	removed, err := h.tasks.PurgeDeleted(r.Context(), days)
+	if err != nil {
+		apiError(w, http.StatusInternalServerError, "failed to purge deleted tasks")
+		return
+	}
+	h.auditMutation(r, "purge_deleted", "older_than_days", days, "deleted", removed)
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]int64{"deleted": removed})
 }
 
 func (h *Handler) handleV1CreateTask(w http.ResponseWriter, r *http.Request) {

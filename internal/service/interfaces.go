@@ -224,6 +224,10 @@ type TaskService interface {
 	Complete(ctx context.Context, id string) error
 	Delete(ctx context.Context, id string) error
 	PurgeCompleted(ctx context.Context) error
+	// PurgeDeleted hard-deletes soft-deleted rows whose last_modified is older
+	// than olderThanDays. Returns the count removed. Irreversible — used to
+	// keep the ghost backlog bounded after long retention.
+	PurgeDeleted(ctx context.Context, olderThanDays int) (int64, error)
 	BulkComplete(ctx context.Context, ids []string) error
 	BulkDelete(ctx context.Context, ids []string) error
 }

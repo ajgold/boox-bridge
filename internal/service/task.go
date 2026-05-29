@@ -20,6 +20,7 @@ type TaskStore interface {
 	Update(ctx context.Context, t *taskstore.Task) error
 	Delete(ctx context.Context, taskID string) error
 	DeleteCompleted(ctx context.Context) (int64, error)
+	HardDeleteOlderThan(ctx context.Context, cutoffMs int64) (int64, error)
 }
 
 // SyncNotifier is the interface for triggering device sync.
@@ -187,6 +188,30 @@ func (s *taskService) PurgeCompleted(ctx context.Context) error {
 	}
 	s.notify(ctx)
 	return nil
+}
+
+// PurgeDeleted permanently removes soft-deleted tasks whose last_modified is
+// older than olderThanDays days. Returns the row count. Unlike PurgeCompleted
+// (which soft-deletes completed rows), this is the irreversible end of the
+// pipeline — once removed, the row is gone. A non-positive olderThanDays is
+// rejected to prevent accidentally wiping every ghost regardless of age:
+// callers must specify a window explicitly, even if they want to use 0 via
+// some future "purge everything" toggle.
+func (s *taskService) PurgeDeleted(ctx context.Context, olderThanDays int) (int64, error) {
+	if s.store == nil {
+		return 0, nil
+	}
+	if olderThanDays <= 0 {
+		return 0, fmt.Errorf("older_than_days must be > 0, got %d", olderThanDays)
+	}
+	cutoff := time.Now().Add(-time.Duration(olderThanDays) * 24 * time.Hour).UnixMilli()
+	n, err := s.store.HardDeleteOlderThan(ctx, cutoff)
+	if err != nil {
+		return 0, err
+	}
+	// No notify(): hard-purging soft-deleted rows doesn't change what the
+	// live device sees (those rows were already tombstoned).
+	return n, nil
 }
 
 func (s *taskService) BulkComplete(ctx context.Context, ids []string) error {

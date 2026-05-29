@@ -71,6 +71,17 @@ func (m *mockTaskStore) DeleteCompleted(ctx context.Context) (int64, error) {
 	return count, nil
 }
 
+func (m *mockTaskStore) HardDeleteOlderThan(ctx context.Context, cutoffMs int64) (int64, error) {
+	var count int64
+	for id, t := range m.tasks {
+		if t.IsDeleted == "Y" && t.LastModified.Valid && t.LastModified.Int64 < cutoffMs {
+			delete(m.tasks, id)
+			count++
+		}
+	}
+	return count, nil
+}
+
 type mockNotifier struct {
 	notified int
 }
@@ -409,4 +420,105 @@ func TestMapInternalTask(t *testing.T) {
 			t.Errorf("ForestNote should be nil from a corrupt blob: %+v", got.ForestNote)
 		}
 	})
+}
+
+
+// TestTaskService_PurgeDeleted covers the new hard-purge path: positive days
+// translates into a cutoff that the store sees, non-positive days is rejected
+// at the service boundary, and a nil store is a safe no-op.
+func TestTaskService_PurgeDeleted(t *testing.T) {
+	ctx := context.Background()
+	dayMs := int64(24 * 60 * 60 * 1000)
+
+	t.Run("positive days purges matching rows", func(t *testing.T) {
+		now := time.Now().UnixMilli()
+		store := &mockTaskStore{tasks: map[string]taskstore.Task{
+			"ancient-ghost": {
+				TaskID:       "ancient-ghost",
+				IsDeleted:    "Y",
+				LastModified: sql.NullInt64{Int64: now - 90*dayMs, Valid: true},
+			},
+			"recent-ghost": {
+				TaskID:       "recent-ghost",
+				IsDeleted:    "Y",
+				LastModified: sql.NullInt64{Int64: now - 1*dayMs, Valid: true},
+			},
+			"live": {
+				TaskID:       "live",
+				IsDeleted:    "N",
+				LastModified: sql.NullInt64{Int64: now - 90*dayMs, Valid: true},
+			},
+		}}
+		svc := &taskService{store: store}
+
+		removed, err := svc.PurgeDeleted(ctx, 30)
+		if err != nil {
+			t.Fatalf("PurgeDeleted: %v", err)
+		}
+		if removed != 1 {
+			t.Errorf("removed: got %d, want 1", removed)
+		}
+		if _, present := store.tasks["ancient-ghost"]; present {
+			t.Error("ancient-ghost should have been hard-deleted")
+		}
+		if _, present := store.tasks["recent-ghost"]; !present {
+			t.Error("recent-ghost should still be present (inside safety window)")
+		}
+		if _, present := store.tasks["live"]; !present {
+			t.Error("live row should be untouched by hard-purge")
+		}
+	})
+
+	t.Run("zero or negative days is rejected", func(t *testing.T) {
+		svc := &taskService{store: &mockTaskStore{tasks: map[string]taskstore.Task{}}}
+		for _, days := range []int{0, -1, -30} {
+			if _, err := svc.PurgeDeleted(ctx, days); err == nil {
+				t.Errorf("PurgeDeleted(%d) should return error, got nil", days)
+			}
+		}
+	})
+
+	t.Run("nil store is a no-op", func(t *testing.T) {
+		svc := &taskService{store: nil}
+		removed, err := svc.PurgeDeleted(ctx, 30)
+		if err != nil {
+			t.Errorf("nil-store PurgeDeleted should not error: %v", err)
+		}
+		if removed != 0 {
+			t.Errorf("nil-store removed: got %d, want 0", removed)
+		}
+	})
+
+	t.Run("does not notify (ghosts are already tombstoned)", func(t *testing.T) {
+		notifier := &mockNotifier{}
+		svc := &taskService{
+			store:    &mockTaskStore{tasks: map[string]taskstore.Task{}},
+			notifier: notifier,
+		}
+		if _, err := svc.PurgeDeleted(ctx, 30); err != nil {
+			t.Fatalf("PurgeDeleted: %v", err)
+		}
+		if notifier.notified != 0 {
+			t.Errorf("PurgeDeleted should not notify; notify count: %d", notifier.notified)
+		}
+	})
+
+	t.Run("propagates store error", func(t *testing.T) {
+		base := &mockTaskStore{tasks: map[string]taskstore.Task{}}
+		svc := &taskService{store: &errStore{TaskStore: base, err: errors.New("disk full")}}
+		if _, err := svc.PurgeDeleted(ctx, 30); err == nil || err.Error() != "disk full" {
+			t.Errorf("expected disk-full error, got %v", err)
+		}
+	})
+}
+
+// errStore wraps a TaskStore and forces HardDeleteOlderThan to fail; used by
+// the PurgeDeleted error-propagation subtest.
+type errStore struct {
+	TaskStore
+	err error
+}
+
+func (e *errStore) HardDeleteOlderThan(ctx context.Context, cutoffMs int64) (int64, error) {
+	return 0, e.err
 }

@@ -62,8 +62,8 @@ func formatTask(t task) string {
 	return sb.String()
 }
 
-// registerTaskTools wires the seven task-manipulation tools onto an MCP
-// server instance.
+// registerTaskTools wires the task-manipulation tools onto an MCP server
+// instance.
 func registerTaskTools(server *mcp.Server, client *apiClient) {
 	registerListTasks(server, client)
 	registerGetTask(server, client)
@@ -72,6 +72,7 @@ func registerTaskTools(server *mcp.Server, client *apiClient) {
 	registerCompleteTask(server, client)
 	registerDeleteTask(server, client)
 	registerPurgeCompletedTasks(server, client)
+	registerPurgeDeletedTasks(server, client)
 }
 
 // --- list_tasks ---
@@ -372,6 +373,50 @@ func registerPurgeCompletedTasks(server *mcp.Server, client *apiClient) {
 		}
 		return &mcp.CallToolResult{
 			Content: []mcp.Content{&mcp.TextContent{Text: "All completed tasks purged.\n"}},
+		}, nil, nil
+	})
+}
+
+// --- purge_deleted_tasks ---
+
+// PurgeDeletedTasksInput controls the age cutoff for the hard-purge. Zero
+// means "use the server default" (30 days). Negative values are rejected
+// server-side.
+type PurgeDeletedTasksInput struct {
+	OlderThanDays int `json:"older_than_days,omitempty"`
+}
+
+func registerPurgeDeletedTasks(server *mcp.Server, client *apiClient) {
+	mcp.AddTool[PurgeDeletedTasksInput, any](server, &mcp.Tool{
+		Name: "purge_deleted_tasks",
+		Description: "PERMANENTLY remove soft-deleted tasks older than older_than_days (default 30, must be > 0). " +
+			"This is the only operation that actually frees rows from the task store — every other 'delete' just tombstones. " +
+			"Irreversible. Returns the number of rows removed. Use this to clear the trash backlog; pair with list_tasks { include_deleted: true } " +
+			"to confirm what's eligible before running.",
+	}, func(ctx context.Context, req *mcp.CallToolRequest, input PurgeDeletedTasksInput) (*mcp.CallToolResult, any, error) {
+		path := "/api/v1/tasks/purge-deleted"
+		if input.OlderThanDays > 0 {
+			path = fmt.Sprintf("%s?older_than_days=%d", path, input.OlderThanDays)
+		}
+		resp, err := client.postJSON(ctx, path, nil)
+		if err != nil {
+			return nil, nil, fmt.Errorf("API request failed: %w", err)
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode != 200 {
+			raw, _ := io.ReadAll(resp.Body)
+			return nil, nil, fmt.Errorf("API returned %d: %s", resp.StatusCode, string(raw))
+		}
+		var body struct {
+			Deleted int64 `json:"deleted"`
+		}
+		if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+			return nil, nil, fmt.Errorf("decode response: %w", err)
+		}
+		return &mcp.CallToolResult{
+			Content: []mcp.Content{&mcp.TextContent{
+				Text: fmt.Sprintf("Hard-purged %d soft-deleted task(s).\n", body.Deleted),
+			}},
 		}, nil, nil
 	})
 }
