@@ -33,6 +33,10 @@ type Task struct {
 	Links         sql.NullString
 	IsDeleted     string
 	ICalBlob      sql.NullString
+	// CreatedAt mirrors the taskdb `tasks.created_at` column (ms UTC). Taskdb-only:
+	// SPC's t_schedule_task has no created_at; mapping leaves it zero. Surfaced in
+	// the REST API as `created_at` (was previously mis-mapped from DueTime).
+	CreatedAt int64
 	// ForestNote provenance (taskdb-only; SPC ignores).
 	ForestNoteNotebookID   sql.NullString
 	ForestNotePageID       sql.NullString

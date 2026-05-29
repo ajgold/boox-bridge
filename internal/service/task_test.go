@@ -281,3 +281,124 @@ func TestTaskService_Update(t *testing.T) {
 		}
 	})
 }
+
+// TestMapInternalTask covers the response-mapping fixes: created_at no longer
+// comes from DueTime, URL/Priority/Categories/ForestNote are populated, and
+// non-FN tasks omit the ForestNote block entirely.
+func TestMapInternalTask(t *testing.T) {
+	t.Run("CreatedAt from row column, not DueTime", func(t *testing.T) {
+		createdMs := int64(1740000000000) // 2025-02-19
+		dueMs := int64(1750000000000)     // 2025-06-15
+		in := taskstore.Task{
+			TaskID:    "id",
+			Title:     sql.NullString{String: "T", Valid: true},
+			Status:    sql.NullString{String: "needsAction", Valid: true},
+			CreatedAt: createdMs,
+			DueTime:   dueMs,
+		}
+		got := mapInternalTask(in)
+		if got.CreatedAt.UnixMilli() != createdMs {
+			t.Errorf("CreatedAt: got %d want %d (DueTime mis-mapping regression)",
+				got.CreatedAt.UnixMilli(), createdMs)
+		}
+		if got.DueAt == nil || got.DueAt.UnixMilli() != dueMs {
+			t.Errorf("DueAt: got %+v want %d", got.DueAt, dueMs)
+		}
+	})
+
+	t.Run("URL and Priority surface from row", func(t *testing.T) {
+		in := taskstore.Task{
+			TaskID:     "id",
+			Title:      sql.NullString{String: "T", Valid: true},
+			Status:     sql.NullString{String: "needsAction", Valid: true},
+			Links:      sql.NullString{String: "https://ub.example/n/abc/p/def", Valid: true},
+			Importance: sql.NullString{String: "1", Valid: true},
+		}
+		got := mapInternalTask(in)
+		if got.URL == nil || *got.URL != "https://ub.example/n/abc/p/def" {
+			t.Errorf("URL: got %+v want https://...", got.URL)
+		}
+		if got.Priority == nil || *got.Priority != "1" {
+			t.Errorf("Priority: got %+v want 1", got.Priority)
+		}
+	})
+
+	t.Run("ForestNote block populated when any column is non-NULL", func(t *testing.T) {
+		in := taskstore.Task{
+			TaskID:                 "id",
+			Title:                  sql.NullString{String: "T", Valid: true},
+			Status:                 sql.NullString{String: "needsAction", Valid: true},
+			ForestNoteNotebookID:   sql.NullString{String: "01HZ3KAY", Valid: true},
+			ForestNotePageID:       sql.NullString{String: "01HZ3L7M", Valid: true},
+			ForestNoteNotebookName: sql.NullString{String: "Project Notes", Valid: true},
+			ForestNoteSource:       sql.NullString{String: "lasso", Valid: true},
+		}
+		got := mapInternalTask(in)
+		if got.ForestNote == nil {
+			t.Fatal("ForestNote should be non-nil")
+		}
+		if got.ForestNote.NotebookID != "01HZ3KAY" {
+			t.Errorf("NotebookID: got %q", got.ForestNote.NotebookID)
+		}
+		if got.ForestNote.Source != "lasso" {
+			t.Errorf("Source: got %q", got.ForestNote.Source)
+		}
+	})
+
+	t.Run("non-FN task omits ForestNote block", func(t *testing.T) {
+		in := taskstore.Task{
+			TaskID: "id",
+			Title:  sql.NullString{String: "From Apple Reminders", Valid: true},
+			Status: sql.NullString{String: "needsAction", Valid: true},
+		}
+		got := mapInternalTask(in)
+		if got.ForestNote != nil {
+			t.Errorf("ForestNote should be nil for non-FN task: %+v", got.ForestNote)
+		}
+		if got.URL != nil {
+			t.Errorf("URL should be nil: %+v", got.URL)
+		}
+		if got.Priority != nil {
+			t.Errorf("Priority should be nil: %+v", got.Priority)
+		}
+	})
+
+	t.Run("Categories + NativeURL parsed from blob", func(t *testing.T) {
+		blob := "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:test\r\n" +
+			"BEGIN:VTODO\r\nUID:id\r\nSUMMARY:T\r\n" +
+			"CATEGORIES:work,urgent\r\n" +
+			"X-FORESTNOTE-NATIVE-URL:forestnote://notebook/abc/page/def\r\n" +
+			"END:VTODO\r\nEND:VCALENDAR\r\n"
+		in := taskstore.Task{
+			TaskID:   "id",
+			Title:    sql.NullString{String: "T", Valid: true},
+			Status:   sql.NullString{String: "needsAction", Valid: true},
+			ICalBlob: sql.NullString{String: blob, Valid: true},
+		}
+		got := mapInternalTask(in)
+		if len(got.Categories) != 2 || got.Categories[0] != "work" || got.Categories[1] != "urgent" {
+			t.Errorf("Categories: got %v want [work urgent]", got.Categories)
+		}
+		// NativeURL came from blob alone — no structured FN columns set —
+		// so ForestNote block exists but only NativeURL is populated.
+		if got.ForestNote == nil || got.ForestNote.NativeURL != "forestnote://notebook/abc/page/def" {
+			t.Errorf("NativeURL: got %+v", got.ForestNote)
+		}
+	})
+
+	t.Run("corrupt blob doesn't crash mapping", func(t *testing.T) {
+		in := taskstore.Task{
+			TaskID:   "id",
+			Title:    sql.NullString{String: "T", Valid: true},
+			Status:   sql.NullString{String: "needsAction", Valid: true},
+			ICalBlob: sql.NullString{String: "not actually iCalendar at all", Valid: true},
+		}
+		got := mapInternalTask(in)
+		if len(got.Categories) != 0 {
+			t.Errorf("Categories should be empty: %v", got.Categories)
+		}
+		if got.ForestNote != nil {
+			t.Errorf("ForestNote should be nil from a corrupt blob: %+v", got.ForestNote)
+		}
+	})
+}

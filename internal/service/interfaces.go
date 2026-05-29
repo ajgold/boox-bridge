@@ -26,13 +26,40 @@ type Task struct {
 	DueAt       *time.Time `json:"due_at,omitempty"`
 	CompletedAt *time.Time `json:"completed_at,omitempty"`
 	Detail      *string    `json:"detail,omitempty"`
-	Links       *TaskLink  `json:"links,omitempty"`
+	// Links is reserved (was never populated); see URL/Priority/Categories/ForestNote
+	// below for the structured task-metadata that mapInternalTask actually fills in.
+	Links *TaskLink `json:"links,omitempty"`
+	// URL surfaces the VTODO URL property (stored in tasks.links). FN auto-fills this
+	// with an https://<ub-host>/forestnote/n/.../p/... deep link; other CalDAV clients
+	// can put anything URI-ish here.
+	URL *string `json:"url,omitempty"`
+	// Priority surfaces VTODO PRIORITY (RFC 5545 §3.8.1.9: integer "1"-"9" as string,
+	// 1=highest, 5=normal, 9=lowest). Stored verbatim in tasks.importance.
+	Priority *string `json:"priority,omitempty"`
+	// Categories surfaces VTODO CATEGORIES, parsed from the ical_blob at response time
+	// (no structured column). Empty list when absent or blob is empty.
+	Categories []string `json:"categories,omitempty"`
+	// ForestNote provenance, populated when the task carried X-FORESTNOTE-* properties
+	// on its inbound VTODO. Nil for non-FN clients (Apple Reminders, Tasks.org, etc.).
+	ForestNote *TaskForestNote `json:"forestnote,omitempty"`
 }
 
 type TaskLink struct {
 	AppName  string `json:"app_name"`
 	FilePath string `json:"file_path"`
 	Page     int    `json:"page"`
+}
+
+// TaskForestNote carries the structured columns extracted from X-FORESTNOTE-*
+// properties at PUT time, plus NativeURL (X-FORESTNOTE-NATIVE-URL) which is
+// parsed from the blob since it's blob-only. All fields are optional — a task
+// may have the notebook IDs without the name, or vice versa.
+type TaskForestNote struct {
+	NotebookID   string `json:"notebook_id,omitempty"`
+	PageID       string `json:"page_id,omitempty"`
+	NotebookName string `json:"notebook_name,omitempty"`
+	Source       string `json:"source,omitempty"`
+	NativeURL    string `json:"native_url,omitempty"`
 }
 
 // NoteFile represents a notebook file (Supernote or Boox).

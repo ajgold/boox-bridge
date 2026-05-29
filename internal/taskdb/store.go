@@ -23,8 +23,8 @@ func NewStore(db *sql.DB) *Store {
 
 const taskColumns = `task_id, title, detail, status, importance, due_time,
 	completed_time, last_modified, recurrence, is_reminder_on, links, is_deleted,
-	ical_blob, forestnote_notebook_id, forestnote_page_id, forestnote_notebook_name,
-	forestnote_source`
+	ical_blob, created_at, forestnote_notebook_id, forestnote_page_id,
+	forestnote_notebook_name, forestnote_source`
 
 func (s *Store) List(ctx context.Context) ([]taskstore.Task, error) {
 	rows, err := s.db.QueryContext(ctx,
@@ -192,6 +192,7 @@ func scanTask(s scanner) (taskstore.Task, error) {
 		&t.TaskID, &t.Title, &t.Detail, &t.Status, &t.Importance,
 		&t.DueTime, &t.CompletedTime, &t.LastModified, &t.Recurrence,
 		&t.IsReminderOn, &t.Links, &t.IsDeleted, &t.ICalBlob,
+		&t.CreatedAt,
 		&t.ForestNoteNotebookID, &t.ForestNotePageID,
 		&t.ForestNoteNotebookName, &t.ForestNoteSource,
 	)

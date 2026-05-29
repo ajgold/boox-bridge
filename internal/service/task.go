@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/sysop/ultrabridge/internal/caldav"
 	"github.com/sysop/ultrabridge/internal/taskstore"
 )
 
@@ -198,7 +199,7 @@ func mapInternalTask(it taskstore.Task) Task {
 		ID:        it.TaskID,
 		Title:     it.Title.String,
 		Status:    TaskStatus(it.Status.String),
-		CreatedAt: time.UnixMilli(it.DueTime), // This mapping might need verification
+		CreatedAt: time.UnixMilli(it.CreatedAt), // taskdb.tasks.created_at (was mis-mapped from DueTime)
 	}
 
 	if it.DueTime > 0 {
@@ -213,6 +214,49 @@ func mapInternalTask(it taskstore.Task) Task {
 
 	if it.Detail.Valid {
 		t.Detail = &it.Detail.String
+	}
+
+	// URL (the VTODO URL property) lives in tasks.links — previously never
+	// surfaced because the response was leaving Task.URL nil.
+	if it.Links.Valid && it.Links.String != "" {
+		u := it.Links.String
+		t.URL = &u
+	}
+
+	// PRIORITY (tasks.importance) — RFC 5545 emits it as a string-coerced
+	// integer "1"-"9"; we pass it through verbatim.
+	if it.Importance.Valid && it.Importance.String != "" {
+		p := it.Importance.String
+		t.Priority = &p
+	}
+
+	// ForestNote provenance block: nil when none of the structured columns
+	// are populated, so non-FN tasks (Apple Reminders, Tasks.org, etc.) drop
+	// the field from the JSON entirely via omitempty.
+	if it.ForestNoteNotebookID.Valid || it.ForestNotePageID.Valid ||
+		it.ForestNoteNotebookName.Valid || it.ForestNoteSource.Valid {
+		t.ForestNote = &TaskForestNote{
+			NotebookID:   it.ForestNoteNotebookID.String,
+			PageID:       it.ForestNotePageID.String,
+			NotebookName: it.ForestNoteNotebookName.String,
+			Source:       it.ForestNoteSource.String,
+		}
+	}
+
+	// Categories + native URL live in the blob (no structured column). Parse
+	// on-read; ParseBlobMetadata returns zero values on any failure so this
+	// path can never crash the response. Blank blob is the common case.
+	if it.ICalBlob.Valid && it.ICalBlob.String != "" {
+		meta := caldav.ParseBlobMetadata(it.ICalBlob.String)
+		if len(meta.Categories) > 0 {
+			t.Categories = meta.Categories
+		}
+		if meta.NativeURL != "" {
+			if t.ForestNote == nil {
+				t.ForestNote = &TaskForestNote{}
+			}
+			t.ForestNote.NativeURL = meta.NativeURL
+		}
 	}
 
 	return t

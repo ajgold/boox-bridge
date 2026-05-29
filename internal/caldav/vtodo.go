@@ -282,6 +282,60 @@ func HasVEvent(cal *ical.Calendar) bool {
 	return false
 }
 
+// BlobMetadata is the subset of VTODO properties we read out of the stored
+// ical_blob at response-mapping time (instead of at PUT time). Categories and
+// the FN native URL stay blob-only — the categories list because it's
+// list-shaped and we'd rather not normalize it into a column, the native URL
+// because it lives in X-FORESTNOTE-NATIVE-URL (an extension property paired
+// with the structured URL).
+type BlobMetadata struct {
+	Categories []string
+	NativeURL  string
+}
+
+// ParseBlobMetadata extracts category and native-URL info from a stored
+// VCALENDAR blob. Returns a zero-value BlobMetadata on any parse failure
+// (blank/corrupt blob, no VTODO, etc.) — never errors. Callers should treat
+// an empty Categories list as "no categories" rather than as a parse error.
+func ParseBlobMetadata(blob string) BlobMetadata {
+	if blob == "" {
+		return BlobMetadata{}
+	}
+	cal, err := ical.NewDecoder(strings.NewReader(blob)).Decode()
+	if err != nil {
+		return BlobMetadata{}
+	}
+	todo, err := FindVTODO(cal)
+	if err != nil || todo == nil {
+		return BlobMetadata{}
+	}
+	out := BlobMetadata{}
+	// CATEGORIES: RFC 5545 §3.8.1.2 — comma-separated TEXT list; may appear
+	// multiple times. We coalesce all occurrences into one slice and trim
+	// per-element whitespace; empty values are dropped.
+	for _, p := range todo.Props.Values("CATEGORIES") {
+		raw := p.Value
+		if t, terr := p.Text(); terr == nil && t != "" {
+			raw = t
+		}
+		for _, c := range strings.Split(raw, ",") {
+			c = strings.TrimSpace(c)
+			if c != "" {
+				out.Categories = append(out.Categories, c)
+			}
+		}
+	}
+	// X-FORESTNOTE-NATIVE-URL: blob-only (sibling of the structured URL).
+	if p := todo.Props.Get("X-FORESTNOTE-NATIVE-URL"); p != nil {
+		if t, terr := p.Text(); terr == nil && t != "" {
+			out.NativeURL = t
+		} else if p.Value != "" {
+			out.NativeURL = p.Value
+		}
+	}
+	return out
+}
+
 // extractForestNoteMetadata reads any X-FORESTNOTE-* properties off the VTODO
 // and stamps the matching ForestNote* fields on the task. The blob path keeps
 // the bytes intact regardless; this helper is purely about lifting the values
