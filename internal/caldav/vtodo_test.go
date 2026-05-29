@@ -267,6 +267,93 @@ func TestVTODOToTask(t *testing.T) {
 				}
 			},
 		},
+		{
+			// FN emits X-FORESTNOTE-* on every task it pushes; we lift them into
+			// structured columns so MCP can answer "tasks from notebook X" without
+			// re-parsing the blob.
+			name: "X-FORESTNOTE-* lifted to ForestNote* columns",
+			cal: func() *ical.Calendar {
+				cal := ical.NewCalendar()
+				todo := ical.NewComponent("VTODO")
+				todo.Props.Set(&ical.Prop{Name: "UID", Value: "fn-1"})
+				todo.Props.Set(&ical.Prop{Name: "STATUS", Value: "NEEDS-ACTION"})
+				todo.Props.Set(&ical.Prop{Name: "SUMMARY", Value: "From a notebook"})
+				todo.Props.Set(&ical.Prop{Name: "X-FORESTNOTE-NOTEBOOK-ID", Value: "01HZ3KAY"})
+				todo.Props.Set(&ical.Prop{Name: "X-FORESTNOTE-PAGE-ID", Value: "01HZ3L7M"})
+				todo.Props.Set(&ical.Prop{Name: "X-FORESTNOTE-NOTEBOOK-NAME", Value: "Project Notes"})
+				todo.Props.Set(&ical.Prop{Name: "X-FORESTNOTE-SOURCE", Value: "lasso"})
+				cal.Children = append(cal.Children, todo)
+				return cal
+			}(),
+			dueTimeMode: "preserve",
+			verify: func(t *testing.T, task *taskstore.Task) {
+				if !task.ForestNoteNotebookID.Valid || task.ForestNoteNotebookID.String != "01HZ3KAY" {
+					t.Errorf("notebook id mismatch: %+v", task.ForestNoteNotebookID)
+				}
+				if !task.ForestNotePageID.Valid || task.ForestNotePageID.String != "01HZ3L7M" {
+					t.Errorf("page id mismatch: %+v", task.ForestNotePageID)
+				}
+				if !task.ForestNoteNotebookName.Valid || task.ForestNoteNotebookName.String != "Project Notes" {
+					t.Errorf("notebook name mismatch: %+v", task.ForestNoteNotebookName)
+				}
+				if !task.ForestNoteSource.Valid || task.ForestNoteSource.String != "lasso" {
+					t.Errorf("source mismatch: %+v", task.ForestNoteSource)
+				}
+			},
+		},
+		{
+			// Non-FN clients (Apple Reminders, Tasks.org, etc.) won't emit any X-*;
+			// all four columns must stay NULL so the partial index on notebook_id
+			// continues to exclude them.
+			name: "no X-FORESTNOTE-* properties leaves columns NULL",
+			cal: createTestCalendar(map[string]string{
+				"UID":     "non-fn",
+				"SUMMARY": "From some other client",
+				"STATUS":  "NEEDS-ACTION",
+			}),
+			dueTimeMode: "preserve",
+			verify: func(t *testing.T, task *taskstore.Task) {
+				if task.ForestNoteNotebookID.Valid {
+					t.Errorf("notebook id should be NULL: %+v", task.ForestNoteNotebookID)
+				}
+				if task.ForestNotePageID.Valid {
+					t.Errorf("page id should be NULL: %+v", task.ForestNotePageID)
+				}
+				if task.ForestNoteNotebookName.Valid {
+					t.Errorf("notebook name should be NULL: %+v", task.ForestNoteNotebookName)
+				}
+				if task.ForestNoteSource.Valid {
+					t.Errorf("source should be NULL: %+v", task.ForestNoteSource)
+				}
+			},
+		},
+		{
+			// A property emitted with an empty value (e.g. a buggy sender that
+			// always emits X-FORESTNOTE-NOTEBOOK-NAME but sometimes has nothing
+			// to put there) should land as NULL, not as "" — that keeps the
+			// "WHERE … IS NOT NULL" filter semantically correct.
+			name: "empty X-FORESTNOTE-* value normalizes to NULL",
+			cal: func() *ical.Calendar {
+				cal := ical.NewCalendar()
+				todo := ical.NewComponent("VTODO")
+				todo.Props.Set(&ical.Prop{Name: "UID", Value: "empty-name"})
+				todo.Props.Set(&ical.Prop{Name: "STATUS", Value: "NEEDS-ACTION"})
+				todo.Props.Set(&ical.Prop{Name: "SUMMARY", Value: "T"})
+				todo.Props.Set(&ical.Prop{Name: "X-FORESTNOTE-NOTEBOOK-ID", Value: "01HZ"})
+				todo.Props.Set(&ical.Prop{Name: "X-FORESTNOTE-NOTEBOOK-NAME", Value: ""})
+				cal.Children = append(cal.Children, todo)
+				return cal
+			}(),
+			dueTimeMode: "preserve",
+			verify: func(t *testing.T, task *taskstore.Task) {
+				if !task.ForestNoteNotebookID.Valid || task.ForestNoteNotebookID.String != "01HZ" {
+					t.Errorf("notebook id mismatch: %+v", task.ForestNoteNotebookID)
+				}
+				if task.ForestNoteNotebookName.Valid {
+					t.Errorf("empty value should normalize to NULL: %+v", task.ForestNoteNotebookName)
+				}
+			},
+		},
 	}
 
 	for _, tt := range tests {

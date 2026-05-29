@@ -11,6 +11,12 @@ import "database/sql"
 // 2. All sort columns are NULLable with no NOT NULL constraints
 // 3. Observed behavior: the device reassigns sort order on sync
 // If device behavior differs, the Create method can set default sort values.
+//
+// The trailing ForestNote* fields are taskdb-only (UB's `tasks` table) and are
+// always NULL in the SPC-side `t_schedule_task` table. They mirror the
+// X-FORESTNOTE-* extension properties on the inbound VTODO so MCP / REST can
+// answer queries like "tasks from notebook X" without re-parsing ical_blob on
+// every read. The SPC mapping layer (internal/spcserver/mapping) ignores them.
 type Task struct {
 	TaskID        string
 	TaskListID    sql.NullString
@@ -27,4 +33,9 @@ type Task struct {
 	Links         sql.NullString
 	IsDeleted     string
 	ICalBlob      sql.NullString
+	// ForestNote provenance (taskdb-only; SPC ignores).
+	ForestNoteNotebookID   sql.NullString
+	ForestNotePageID       sql.NullString
+	ForestNoteNotebookName sql.NullString
+	ForestNoteSource       sql.NullString
 }

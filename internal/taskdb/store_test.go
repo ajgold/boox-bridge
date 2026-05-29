@@ -451,3 +451,151 @@ func TestStore_Create_SetDefaults(t *testing.T) {
 		t.Errorf("Status should default to 'needsAction', got %q", taskstore.NullStr(task.Status))
 	}
 }
+
+// TestStore_ForestNoteFieldsRoundTrip verifies the four ForestNote provenance
+// columns Create-then-Get cleanly with the same values, and that an Update
+// preserves them when re-supplied.
+func TestStore_ForestNoteFieldsRoundTrip(t *testing.T) {
+	store := openTestStore(t)
+
+	task := &taskstore.Task{
+		Title:                  sql.NullString{String: "From notebook", Valid: true},
+		IsDeleted:              "N",
+		ForestNoteNotebookID:   sql.NullString{String: "01HZ3KAY", Valid: true},
+		ForestNotePageID:       sql.NullString{String: "01HZ3L7M", Valid: true},
+		ForestNoteNotebookName: sql.NullString{String: "Project Notes", Valid: true},
+		ForestNoteSource:       sql.NullString{String: "lasso", Valid: true},
+	}
+	if err := store.Create(context.Background(), task); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	got, err := store.Get(context.Background(), task.TaskID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got.ForestNoteNotebookID != task.ForestNoteNotebookID {
+		t.Errorf("notebook id: got %+v want %+v", got.ForestNoteNotebookID, task.ForestNoteNotebookID)
+	}
+	if got.ForestNotePageID != task.ForestNotePageID {
+		t.Errorf("page id: got %+v want %+v", got.ForestNotePageID, task.ForestNotePageID)
+	}
+	if got.ForestNoteNotebookName != task.ForestNoteNotebookName {
+		t.Errorf("notebook name: got %+v want %+v", got.ForestNoteNotebookName, task.ForestNoteNotebookName)
+	}
+	if got.ForestNoteSource != task.ForestNoteSource {
+		t.Errorf("source: got %+v want %+v", got.ForestNoteSource, task.ForestNoteSource)
+	}
+
+	// Update path must carry the values through (no implicit NULLing).
+	got.Title = sql.NullString{String: "renamed", Valid: true}
+	if err := store.Update(context.Background(), got); err != nil {
+		t.Fatalf("Update: %v", err)
+	}
+	got2, err := store.Get(context.Background(), task.TaskID)
+	if err != nil {
+		t.Fatalf("Get after update: %v", err)
+	}
+	if got2.ForestNoteNotebookID.String != "01HZ3KAY" {
+		t.Errorf("notebook id lost on update: %+v", got2.ForestNoteNotebookID)
+	}
+}
+
+// TestMigrate_AddsForestNoteColumnsToExistingDB simulates the live deployment:
+// the `tasks` table already exists from an older build that pre-dated the
+// ForestNote columns. Running migrate() must add the four columns in place,
+// without dropping or renaming the table, and existing rows must still be
+// readable + writable.
+func TestMigrate_AddsForestNoteColumnsToExistingDB(t *testing.T) {
+	dsn := "file::memory:?_pragma=journal_mode(WAL)&_pragma=foreign_keys(1)"
+	db, err := sql.Open("sqlite", dsn)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	t.Cleanup(func() { db.Close() })
+	db.SetMaxOpenConns(1)
+
+	// Hand-roll the pre-ForestNote-columns schema. This is the shape that's
+	// live on the server today (commit 8224b03, 1,513 rows on disk).
+	preForestNoteSchema := []string{
+		`CREATE TABLE tasks (
+			task_id        TEXT PRIMARY KEY,
+			title          TEXT,
+			detail         TEXT,
+			status         TEXT NOT NULL DEFAULT 'needsAction',
+			importance     TEXT,
+			due_time       INTEGER NOT NULL DEFAULT 0,
+			completed_time INTEGER NOT NULL DEFAULT 0,
+			last_modified  INTEGER NOT NULL DEFAULT 0,
+			recurrence     TEXT,
+			is_reminder_on TEXT NOT NULL DEFAULT 'N',
+			links          TEXT,
+			is_deleted     TEXT NOT NULL DEFAULT 'N',
+			ical_blob      TEXT,
+			created_at     INTEGER NOT NULL,
+			updated_at     INTEGER NOT NULL
+		)`,
+		`CREATE TABLE sync_state (
+			adapter_id      TEXT PRIMARY KEY,
+			last_sync_token TEXT,
+			last_sync_at    INTEGER NOT NULL DEFAULT 0
+		)`,
+		`CREATE TABLE task_sync_map (
+			task_id     TEXT NOT NULL REFERENCES tasks(task_id),
+			adapter_id  TEXT NOT NULL,
+			remote_id   TEXT NOT NULL,
+			remote_etag TEXT,
+			last_pushed_at  INTEGER NOT NULL DEFAULT 0,
+			last_pulled_at  INTEGER NOT NULL DEFAULT 0,
+			PRIMARY KEY (task_id, adapter_id)
+		)`,
+		`INSERT INTO tasks (task_id, title, status, created_at, updated_at) VALUES ('legacy-1', 'pre-migration row', 'needsAction', 1, 1)`,
+	}
+	for _, stmt := range preForestNoteSchema {
+		if _, err := db.ExecContext(context.Background(), stmt); err != nil {
+			t.Fatalf("setup: %v", err)
+		}
+	}
+
+	if err := migrate(context.Background(), db); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+
+	// The four new columns must now be present.
+	wantCols := []string{
+		"forestnote_notebook_id",
+		"forestnote_page_id",
+		"forestnote_notebook_name",
+		"forestnote_source",
+	}
+	for _, col := range wantCols {
+		var c int
+		if err := db.QueryRowContext(context.Background(),
+			`SELECT COUNT(*) FROM pragma_table_info('tasks') WHERE name=?`, col).Scan(&c); err != nil {
+			t.Fatalf("pragma check %s: %v", col, err)
+		}
+		if c != 1 {
+			t.Errorf("column %s not added by migrate (count=%d)", col, c)
+		}
+	}
+
+	// The legacy row should still be readable and the new columns should be NULL on it.
+	store := NewStore(db)
+	got, err := store.Get(context.Background(), "legacy-1")
+	if err != nil {
+		t.Fatalf("Get legacy row: %v", err)
+	}
+	if got.ForestNoteNotebookID.Valid {
+		t.Errorf("legacy row notebook_id should be NULL, got %+v", got.ForestNoteNotebookID)
+	}
+	if got.ForestNotePageID.Valid {
+		t.Errorf("legacy row page_id should be NULL, got %+v", got.ForestNotePageID)
+	}
+
+	// Running migrate() a second time must be a no-op (idempotency).
+	if err := migrate(context.Background(), db); err != nil {
+		t.Fatalf("second migrate: %v", err)
+	}
+}
+
+

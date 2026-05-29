@@ -217,6 +217,11 @@ func VTODOToTask(cal *ical.Calendar, dueTimeMode string) (*taskstore.Task, error
 		}
 	}
 
+	// Extract ForestNote provenance (X-FORESTNOTE-*) into structured columns so
+	// the REST/MCP filter surface doesn't have to re-parse the blob on every read.
+	// The blob still carries the raw bytes either way.
+	extractForestNoteMetadata(todo, t)
+
 	// Store full VCALENDAR as blob for round-trip fidelity
 	var buf bytes.Buffer
 	if err := ical.NewEncoder(&buf).Encode(cal); err == nil {
@@ -275,4 +280,38 @@ func HasVEvent(cal *ical.Calendar) bool {
 		}
 	}
 	return false
+}
+
+// extractForestNoteMetadata reads any X-FORESTNOTE-* properties off the VTODO
+// and stamps the matching ForestNote* fields on the task. The blob path keeps
+// the bytes intact regardless; this helper is purely about lifting the values
+// into structured columns so the REST API and MCP can filter on them.
+//
+// Defensive: every read tolerates the property being absent (the common case for
+// non-ForestNote clients). Empty strings are stored as NULL (sql.NullString
+// zero-value) so a sender that emits the property with no value matches the
+// SQL filter "WHERE forestnote_notebook_id IS NOT NULL" exactly.
+func extractForestNoteMetadata(todo *ical.Component, t *taskstore.Task) {
+	t.ForestNoteNotebookID = nullStringFromProp(todo, "X-FORESTNOTE-NOTEBOOK-ID")
+	t.ForestNotePageID = nullStringFromProp(todo, "X-FORESTNOTE-PAGE-ID")
+	t.ForestNoteNotebookName = nullStringFromProp(todo, "X-FORESTNOTE-NOTEBOOK-NAME")
+	t.ForestNoteSource = nullStringFromProp(todo, "X-FORESTNOTE-SOURCE")
+}
+
+// nullStringFromProp returns the named property's value as a sql.NullString,
+// using `.Text()` so RFC 5545 TEXT escapes (`\,` `\;` `\n` `\\`) are unescaped
+// for properties of TEXT type; falls back to the raw Value for non-TEXT props
+// (where go-ical leaves Text() returning an error).
+func nullStringFromProp(c *ical.Component, name string) sql.NullString {
+	p := c.Props.Get(name)
+	if p == nil {
+		return sql.NullString{}
+	}
+	if v, err := p.Text(); err == nil && v != "" {
+		return sql.NullString{String: v, Valid: true}
+	}
+	if p.Value == "" {
+		return sql.NullString{}
+	}
+	return sql.NullString{String: p.Value, Valid: true}
 }

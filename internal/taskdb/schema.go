@@ -23,7 +23,13 @@ func migrate(ctx context.Context, db *sql.DB) error {
 			is_deleted     TEXT NOT NULL DEFAULT 'N',
 			ical_blob      TEXT,
 			created_at     INTEGER NOT NULL,
-			updated_at     INTEGER NOT NULL
+			updated_at     INTEGER NOT NULL,
+			-- ForestNote provenance, extracted from X-FORESTNOTE-* on inbound VTODOs.
+			-- Indexed (idx_tasks_forestnote_notebook) for "tasks from notebook X" filters.
+			forestnote_notebook_id    TEXT,
+			forestnote_page_id        TEXT,
+			forestnote_notebook_name  TEXT,
+			forestnote_source         TEXT
 		)`,
 		`CREATE TABLE IF NOT EXISTS sync_state (
 			adapter_id      TEXT PRIMARY KEY,
@@ -41,6 +47,9 @@ func migrate(ctx context.Context, db *sql.DB) error {
 			PRIMARY KEY (task_id, adapter_id)
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_task_sync_map_remote ON task_sync_map(adapter_id, remote_id)`,
+		// Partial index — only rows with a ForestNote origin carry the value, so this stays cheap
+		// even on the SPC-dominated row population. Powers the "list_tasks ?notebook_id=…" filter.
+		`CREATE INDEX IF NOT EXISTS idx_tasks_forestnote_notebook ON tasks(forestnote_notebook_id) WHERE forestnote_notebook_id IS NOT NULL`,
 	}
 	for i, stmt := range stmts {
 		if _, err := db.ExecContext(ctx, stmt); err != nil {
@@ -54,6 +63,26 @@ func migrate(ctx context.Context, db *sql.DB) error {
 	if count == 0 {
 		if _, err := db.ExecContext(ctx, `ALTER TABLE task_sync_map ADD COLUMN last_seen_at INTEGER NOT NULL DEFAULT 0`); err != nil {
 			return fmt.Errorf("add last_seen_at column: %w", err)
+		}
+	}
+
+	// Idempotent ALTERs for the four ForestNote provenance columns. Existing live deployments
+	// pre-date these — added 2026-05-29 alongside FN-side X-FORESTNOTE-* emission. The columns
+	// are nullable with no default; pre-existing rows stay NULL until a fresh PUT overwrites them.
+	for _, col := range []string{
+		"forestnote_notebook_id",
+		"forestnote_page_id",
+		"forestnote_notebook_name",
+		"forestnote_source",
+	} {
+		var c int
+		_ = db.QueryRowContext(ctx,
+			`SELECT COUNT(*) FROM pragma_table_info('tasks') WHERE name=?`, col).Scan(&c)
+		if c == 0 {
+			if _, err := db.ExecContext(ctx,
+				fmt.Sprintf(`ALTER TABLE tasks ADD COLUMN %s TEXT`, col)); err != nil {
+				return fmt.Errorf("add %s column: %w", col, err)
+			}
 		}
 	}
 
