@@ -39,6 +39,11 @@ type Task struct {
 	// Categories surfaces VTODO CATEGORIES, parsed from the ical_blob at response time
 	// (no structured column). Empty list when absent or blob is empty.
 	Categories []string `json:"categories,omitempty"`
+	// Comment surfaces VTODO COMMENT (RFC 5545 §3.8.1.4), parsed from the
+	// ical_blob at response time. Multi-COMMENT VTODOs are joined with blank
+	// lines. FN may write the full recognized-text body here when the user
+	// opts in to "include recognized text"; clients render as preformatted.
+	Comment string `json:"comment,omitempty"`
 	// ForestNote provenance, populated when the task carried X-FORESTNOTE-* properties
 	// on its inbound VTODO. Nil for non-FN clients (Apple Reminders, Tasks.org, etc.).
 	ForestNote *TaskForestNote `json:"forestnote,omitempty"`
@@ -200,16 +205,47 @@ type ActiveTask struct {
 }
 
 // TaskPatch is a partial update to a Task. Nil pointer fields mean "leave
-// unchanged"; ClearDueAt exists because a *time.Time can't distinguish
-// "don't touch" from "clear to null" on its own (ClearDueAt wins over DueAt
-// when both are set). Title is non-clearable — CalDAV VTODOs require a
-// SUMMARY, and empty-string titles round-trip poorly to the device. Detail
-// is cleared by sending an empty string ("" is a legitimate empty value).
+// unchanged"; ClearXxx flags exist because a *string / *time.Time can't
+// distinguish "don't touch" from "clear to null" on its own (ClearXxx wins
+// over the value pointer when both are set). Title is non-clearable —
+// CalDAV VTODOs require a SUMMARY, and empty-string titles round-trip poorly
+// to the device. Detail is cleared by sending an empty string ("" is a
+// legitimate empty value, distinct from absent).
+//
+// URL, Priority, Categories, and Comment cover the metadata that REST/MCP
+// writers (not CalDAV PUT — those still go through the iCal blob round-trip)
+// can supply alongside the basics. Categories is wholesale (the patch
+// replaces the entire list; partial add/remove would need a richer API).
 type TaskPatch struct {
-	Title      *string    `json:"title,omitempty"`
+	Title       *string    `json:"title,omitempty"`
+	DueAt       *time.Time `json:"due_at,omitempty"`
+	ClearDueAt  bool       `json:"clear_due_at,omitempty"`
+	Detail      *string    `json:"detail,omitempty"`
+	URL         *string    `json:"url,omitempty"`
+	ClearURL    bool       `json:"clear_url,omitempty"`
+	Priority    *string    `json:"priority,omitempty"`
+	ClearPriority bool     `json:"clear_priority,omitempty"`
+	// Categories: nil = leave alone, non-nil (incl. empty slice) = replace.
+	// A nil-vs-empty distinction is expressible in Go JSON decoding via a
+	// pointer, but []string already encodes the same thing — callers send
+	// `"categories": []` to clear, or omit the field to leave unchanged.
+	Categories *[]string `json:"categories,omitempty"`
+	Comment    *string   `json:"comment,omitempty"`
+	ClearComment bool    `json:"clear_comment,omitempty"`
+}
+
+// TaskCreate is the input shape for creating a new task via the
+// service/REST/MCP write path. Title is required; everything else is
+// optional. CalDAV-PUT-created tasks bypass this struct entirely — they
+// flow through VTODOToTask with the full iCal blob preserved.
+type TaskCreate struct {
+	Title      string     `json:"title"`
 	DueAt      *time.Time `json:"due_at,omitempty"`
-	ClearDueAt bool       `json:"clear_due_at,omitempty"`
-	Detail     *string    `json:"detail,omitempty"`
+	Detail     string     `json:"detail,omitempty"`
+	URL        string     `json:"url,omitempty"`
+	Priority   string     `json:"priority,omitempty"`
+	Categories []string   `json:"categories,omitempty"`
+	Comment    string     `json:"comment,omitempty"`
 }
 
 // TaskService is the service-layer task API. List hides soft-deleted rows; use
@@ -219,7 +255,7 @@ type TaskService interface {
 	List(ctx context.Context) ([]Task, error)
 	ListIncludingDeleted(ctx context.Context) ([]Task, error)
 	Get(ctx context.Context, id string) (Task, error)
-	Create(ctx context.Context, title string, dueAt *time.Time) (Task, error)
+	Create(ctx context.Context, input TaskCreate) (Task, error)
 	Update(ctx context.Context, id string, patch TaskPatch) (Task, error)
 	Complete(ctx context.Context, id string) error
 	Delete(ctx context.Context, id string) error

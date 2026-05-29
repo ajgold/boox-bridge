@@ -866,7 +866,7 @@ func (h *Handler) handleCreateTask(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	created, err := h.tasks.Create(r.Context(), title, dueAt)
+	created, err := h.tasks.Create(r.Context(), service.TaskCreate{Title: title, DueAt: dueAt})
 	if err != nil {
 		http.Error(w, "failed to create task", http.StatusInternalServerError)
 		return

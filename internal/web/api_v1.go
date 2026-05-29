@@ -299,21 +299,25 @@ func (h *Handler) handleV1PurgeDeleted(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) handleV1CreateTask(w http.ResponseWriter, r *http.Request) {
-	var req struct {
-		Title string     `json:"title"`
-		DueAt *time.Time `json:"due_at"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	// Decode directly into the service-layer struct so JSON tags stay
+	// single-sourced. Unknown fields are tolerated (forward-compat).
+	var input service.TaskCreate
+	if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
 		apiError(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
-	if req.Title == "" {
+	if input.Title == "" {
 		apiError(w, http.StatusBadRequest, "title is required")
 		return
 	}
 
-	task, err := h.tasks.Create(r.Context(), req.Title, req.DueAt)
+	task, err := h.tasks.Create(r.Context(), input)
 	if err != nil {
+		// title-required, future validation errors — surface message to client.
+		if err.Error() == "title is required" {
+			apiError(w, http.StatusBadRequest, err.Error())
+			return
+		}
 		apiError(w, http.StatusInternalServerError, "failed to create task")
 		return
 	}

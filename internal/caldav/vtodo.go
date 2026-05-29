@@ -283,14 +283,17 @@ func HasVEvent(cal *ical.Calendar) bool {
 }
 
 // BlobMetadata is the subset of VTODO properties we read out of the stored
-// ical_blob at response-mapping time (instead of at PUT time). Categories and
-// the FN native URL stay blob-only — the categories list because it's
-// list-shaped and we'd rather not normalize it into a column, the native URL
-// because it lives in X-FORESTNOTE-NATIVE-URL (an extension property paired
-// with the structured URL).
+// ical_blob at response-mapping time (instead of at PUT time). Categories,
+// the FN native URL, and COMMENT stay blob-only — the categories list because
+// it's list-shaped and we'd rather not normalize it into a column; the native
+// URL because it lives in X-FORESTNOTE-NATIVE-URL (an extension property
+// paired with the structured URL); COMMENT because it can be arbitrary-size
+// text (FN may stuff the full recognized text here) and pinning a TEXT column
+// for it isn't worth the schema churn yet.
 type BlobMetadata struct {
 	Categories []string
 	NativeURL  string
+	Comment    string
 }
 
 // ParseBlobMetadata extracts category and native-URL info from a stored
@@ -337,7 +340,150 @@ func ParseBlobMetadata(blob string) BlobMetadata {
 			out.NativeURL = p.Value
 		}
 	}
+	// COMMENT: RFC 5545 §3.8.1.4 — TEXT property, may appear multiple times;
+	// we join occurrences with a blank line so multi-COMMENT VTODOs round-trip
+	// to a readable single string. Most clients (incl. FN) emit one.
+	for _, p := range todo.Props.Values("COMMENT") {
+		c, terr := p.Text()
+		if terr != nil {
+			c = p.Value
+		}
+		if c == "" {
+			continue
+		}
+		if out.Comment != "" {
+			out.Comment += "\n\n"
+		}
+		out.Comment += c
+	}
 	return out
+}
+
+// BuildBlobWithMetadata constructs a minimal VCALENDAR blob carrying only
+// the metadata properties that have no structured column (CATEGORIES,
+// COMMENT, X-FORESTNOTE-NATIVE-URL). The blob piggybacks UID + a placeholder
+// SUMMARY so downstream blob-overlay paths can identify the VTODO; on
+// outbound serve (taskToVTODOFromBlob), DB-authoritative columns overlay on
+// top, so the placeholder gets replaced.
+//
+// Returns "" when meta carries no payload — callers should leave ICalBlob
+// NULL in that case rather than store an empty-marker blob.
+func BuildBlobWithMetadata(taskID string, meta BlobMetadata) string {
+	if len(meta.Categories) == 0 && meta.Comment == "" && meta.NativeURL == "" {
+		return ""
+	}
+	cal := ical.NewCalendar()
+	cal.Props.SetText("PRODID", "-//UltraBridge//CalDAV//EN")
+	cal.Props.SetText("VERSION", "2.0")
+
+	todo := ical.NewComponent("VTODO")
+	todo.Props.SetText("UID", taskID)
+	todo.Props.SetDateTime("DTSTAMP", time.Now().UTC())
+	// SUMMARY is required by some strict parsers; the blob-overlay path will
+	// replace it with the live Title column on serve, so the placeholder is
+	// invisible to clients.
+	todo.Props.SetText("SUMMARY", "")
+
+	if len(meta.Categories) > 0 {
+		// Emit CATEGORIES as a single multi-value property — go-ical's
+		// SetText escapes per-RFC. Build the comma-joined value manually so
+		// escapes are applied to each item before joining (commas inside a
+		// category value need to be escaped to `\,`).
+		parts := make([]string, 0, len(meta.Categories))
+		for _, c := range meta.Categories {
+			if c == "" {
+				continue
+			}
+			parts = append(parts, escapeICalText(c))
+		}
+		if len(parts) > 0 {
+			p := ical.NewProp("CATEGORIES")
+			p.Value = strings.Join(parts, ",")
+			todo.Props.Set(p)
+		}
+	}
+	if meta.Comment != "" {
+		todo.Props.SetText("COMMENT", meta.Comment)
+	}
+	if meta.NativeURL != "" {
+		todo.Props.SetText("X-FORESTNOTE-NATIVE-URL", meta.NativeURL)
+	}
+
+	cal.Children = append(cal.Children, todo)
+
+	var buf bytes.Buffer
+	if err := ical.NewEncoder(&buf).Encode(cal); err != nil {
+		// Encoding shouldn't fail for a hand-built calendar, but if it does we
+		// drop the blob rather than persist garbage. Caller sees "" and skips.
+		return ""
+	}
+	return buf.String()
+}
+
+// MergeBlobMetadata takes an existing blob and overlays the supplied metadata
+// fields on top, preserving any other properties (X-FORESTNOTE-*, PRIORITY,
+// etc.) that were already in the VTODO. Used on Update to keep the rest of
+// the blob intact when the caller patches just CATEGORIES or COMMENT.
+//
+// If existingBlob is empty/corrupt, falls back to BuildBlobWithMetadata so the
+// update still produces a valid blob carrying the new metadata.
+func MergeBlobMetadata(taskID, existingBlob string, meta BlobMetadata) string {
+	if existingBlob == "" {
+		return BuildBlobWithMetadata(taskID, meta)
+	}
+	cal, err := ical.NewDecoder(strings.NewReader(existingBlob)).Decode()
+	if err != nil {
+		return BuildBlobWithMetadata(taskID, meta)
+	}
+	todo, err := FindVTODO(cal)
+	if err != nil || todo == nil {
+		return BuildBlobWithMetadata(taskID, meta)
+	}
+
+	// Replace CATEGORIES wholesale: a partial update on this list-shaped
+	// property would be confusing (add vs remove individual entries needs a
+	// richer API). The caller patches the whole set.
+	todo.Props.Del("CATEGORIES")
+	if len(meta.Categories) > 0 {
+		parts := make([]string, 0, len(meta.Categories))
+		for _, c := range meta.Categories {
+			if c == "" {
+				continue
+			}
+			parts = append(parts, escapeICalText(c))
+		}
+		if len(parts) > 0 {
+			p := ical.NewProp("CATEGORIES")
+			p.Value = strings.Join(parts, ",")
+			todo.Props.Set(p)
+		}
+	}
+
+	todo.Props.Del("COMMENT")
+	if meta.Comment != "" {
+		todo.Props.SetText("COMMENT", meta.Comment)
+	}
+
+	if meta.NativeURL != "" {
+		todo.Props.SetText("X-FORESTNOTE-NATIVE-URL", meta.NativeURL)
+	}
+
+	var buf bytes.Buffer
+	if err := ical.NewEncoder(&buf).Encode(cal); err != nil {
+		return existingBlob // pessimistic: keep old blob on encoder failure
+	}
+	return buf.String()
+}
+
+// escapeICalText applies RFC 5545 §3.3.11 TEXT escaping (backslash, comma,
+// semicolon, newline). Used inside multi-value CATEGORIES where go-ical's
+// SetText helper would escape the list-separator commas as well.
+func escapeICalText(s string) string {
+	s = strings.ReplaceAll(s, `\`, `\\`)
+	s = strings.ReplaceAll(s, ",", `\,`)
+	s = strings.ReplaceAll(s, ";", `\;`)
+	s = strings.ReplaceAll(s, "\n", `\n`)
+	return s
 }
 
 // extractForestNoteMetadata reads any X-FORESTNOTE-* properties off the VTODO

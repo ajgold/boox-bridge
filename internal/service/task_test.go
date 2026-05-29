@@ -98,7 +98,7 @@ func TestTaskService_Create(t *testing.T) {
 
 	title := "Test Task"
 	due := time.Now().Add(24 * time.Hour)
-	task, err := svc.Create(context.Background(), title, &due)
+	task, err := svc.Create(context.Background(), TaskCreate{Title: title, DueAt: &due})
 	if err != nil {
 		t.Fatalf("Create failed: %v", err)
 	}
@@ -118,7 +118,7 @@ func TestTaskService_Get(t *testing.T) {
 	store := &mockTaskStore{tasks: make(map[string]taskstore.Task)}
 	svc := NewTaskService(store, nil)
 
-	created, err := svc.Create(context.Background(), "find me", nil)
+	created, err := svc.Create(context.Background(), TaskCreate{Title: "find me"})
 	if err != nil {
 		t.Fatalf("Create failed: %v", err)
 	}
@@ -145,7 +145,7 @@ func TestTaskService_Complete(t *testing.T) {
 	notifier := &mockNotifier{}
 	svc := NewTaskService(store, notifier)
 
-	task, _ := svc.Create(context.Background(), "Task 1", nil)
+	task, _ := svc.Create(context.Background(), TaskCreate{Title: "Task 1"})
 
 	err := svc.Complete(context.Background(), task.ID)
 	if err != nil {
@@ -169,9 +169,9 @@ func TestTaskService_BulkActions(t *testing.T) {
 	notifier := &mockNotifier{}
 	svc := NewTaskService(store, notifier)
 
-	t1, _ := svc.Create(context.Background(), "Task 1", nil)
-	t2, _ := svc.Create(context.Background(), "Task 2", nil)
-	t3, _ := svc.Create(context.Background(), "Task 3", nil)
+	t1, _ := svc.Create(context.Background(), TaskCreate{Title: "Task 1"})
+	t2, _ := svc.Create(context.Background(), TaskCreate{Title: "Task 2"})
+	t3, _ := svc.Create(context.Background(), TaskCreate{Title: "Task 3"})
 
 	err := svc.BulkComplete(context.Background(), []string{t1.ID, t2.ID})
 	if err != nil {
@@ -209,7 +209,7 @@ func TestTaskService_Update(t *testing.T) {
 	svc := NewTaskService(store, notifier)
 
 	due := time.Date(2026, 5, 1, 0, 0, 0, 0, time.UTC)
-	created, err := svc.Create(context.Background(), "Draft proposal", &due)
+	created, err := svc.Create(context.Background(), TaskCreate{Title: "Draft proposal", DueAt: &due})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -521,4 +521,172 @@ type errStore struct {
 
 func (e *errStore) HardDeleteOlderThan(ctx context.Context, cutoffMs int64) (int64, error) {
 	return 0, e.err
+}
+
+
+// TestTaskService_Create_WithMetadata covers the extended write surface:
+// URL + Priority land in structured columns; Categories + Comment land in
+// a minimal blob that ParseBlobMetadata can read back immediately (without
+// waiting for a CalDAV round-trip).
+func TestTaskService_Create_WithMetadata(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("structured fields populate column-backed Task fields", func(t *testing.T) {
+		store := &mockTaskStore{tasks: make(map[string]taskstore.Task)}
+		svc := NewTaskService(store, nil)
+
+		task, err := svc.Create(ctx, TaskCreate{
+			Title:    "ship feature",
+			Detail:   "context body",
+			URL:      "https://ub.example/task/abc",
+			Priority: "1",
+		})
+		if err != nil {
+			t.Fatalf("Create: %v", err)
+		}
+		if task.Detail == nil || *task.Detail != "context body" {
+			t.Errorf("Detail: %+v", task.Detail)
+		}
+		if task.URL == nil || *task.URL != "https://ub.example/task/abc" {
+			t.Errorf("URL: %+v", task.URL)
+		}
+		if task.Priority == nil || *task.Priority != "1" {
+			t.Errorf("Priority: %+v", task.Priority)
+		}
+	})
+
+	t.Run("categories + comment round-trip via blob immediately", func(t *testing.T) {
+		store := &mockTaskStore{tasks: make(map[string]taskstore.Task)}
+		svc := NewTaskService(store, nil)
+
+		task, err := svc.Create(ctx, TaskCreate{
+			Title:      "review notes",
+			Categories: []string{"work", "urgent"},
+			Comment:    "Recognized text: meeting outcomes",
+		})
+		if err != nil {
+			t.Fatalf("Create: %v", err)
+		}
+		if len(task.Categories) != 2 || task.Categories[0] != "work" || task.Categories[1] != "urgent" {
+			t.Errorf("Categories round-trip: %v", task.Categories)
+		}
+		if task.Comment != "Recognized text: meeting outcomes" {
+			t.Errorf("Comment round-trip: %q", task.Comment)
+		}
+	})
+
+	t.Run("empty title is rejected", func(t *testing.T) {
+		svc := NewTaskService(&mockTaskStore{tasks: make(map[string]taskstore.Task)}, nil)
+		if _, err := svc.Create(ctx, TaskCreate{Title: ""}); err == nil {
+			t.Error("Create with empty title should error")
+		}
+	})
+
+	t.Run("no metadata means no blob is constructed", func(t *testing.T) {
+		store := &mockTaskStore{tasks: make(map[string]taskstore.Task)}
+		svc := NewTaskService(store, nil)
+
+		task, err := svc.Create(ctx, TaskCreate{Title: "minimal"})
+		if err != nil {
+			t.Fatalf("Create: %v", err)
+		}
+		// Find the persisted taskstore.Task to verify blob is unset.
+		var stored taskstore.Task
+		for _, t := range store.tasks {
+			if t.TaskID == task.ID {
+				stored = t
+				break
+			}
+		}
+		if stored.ICalBlob.Valid && stored.ICalBlob.String != "" {
+			t.Errorf("expected empty blob, got %q", stored.ICalBlob.String)
+		}
+	})
+}
+
+// TestTaskService_Update_NewFields verifies the extended TaskPatch surface
+// patches URL/Priority columns and overlays Categories/Comment into the blob
+// without clobbering pre-existing blob properties.
+func TestTaskService_Update_NewFields(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("URL and Priority patches reach the column", func(t *testing.T) {
+		store := &mockTaskStore{tasks: make(map[string]taskstore.Task)}
+		svc := NewTaskService(store, nil)
+		created, _ := svc.Create(ctx, TaskCreate{Title: "t"})
+
+		url := "https://ub.example/x"
+		prio := "1"
+		updated, err := svc.Update(ctx, created.ID, TaskPatch{
+			URL:      &url,
+			Priority: &prio,
+		})
+		if err != nil {
+			t.Fatalf("Update: %v", err)
+		}
+		if updated.URL == nil || *updated.URL != url {
+			t.Errorf("URL: %+v", updated.URL)
+		}
+		if updated.Priority == nil || *updated.Priority != prio {
+			t.Errorf("Priority: %+v", updated.Priority)
+		}
+	})
+
+	t.Run("ClearURL and ClearPriority null out the columns", func(t *testing.T) {
+		store := &mockTaskStore{tasks: make(map[string]taskstore.Task)}
+		svc := NewTaskService(store, nil)
+		created, _ := svc.Create(ctx, TaskCreate{
+			Title:    "t",
+			URL:      "https://x/",
+			Priority: "1",
+		})
+		updated, err := svc.Update(ctx, created.ID, TaskPatch{
+			ClearURL:      true,
+			ClearPriority: true,
+		})
+		if err != nil {
+			t.Fatalf("Update: %v", err)
+		}
+		if updated.URL != nil {
+			t.Errorf("URL should be cleared: %+v", updated.URL)
+		}
+		if updated.Priority != nil {
+			t.Errorf("Priority should be cleared: %+v", updated.Priority)
+		}
+	})
+
+	t.Run("Categories patch replaces wholesale", func(t *testing.T) {
+		store := &mockTaskStore{tasks: make(map[string]taskstore.Task)}
+		svc := NewTaskService(store, nil)
+		created, _ := svc.Create(ctx, TaskCreate{
+			Title:      "t",
+			Categories: []string{"old"},
+		})
+
+		newCats := []string{"new1", "new2"}
+		updated, err := svc.Update(ctx, created.ID, TaskPatch{Categories: &newCats})
+		if err != nil {
+			t.Fatalf("Update: %v", err)
+		}
+		if len(updated.Categories) != 2 || updated.Categories[0] != "new1" {
+			t.Errorf("Categories: %v", updated.Categories)
+		}
+	})
+
+	t.Run("Comment patch + ClearComment", func(t *testing.T) {
+		store := &mockTaskStore{tasks: make(map[string]taskstore.Task)}
+		svc := NewTaskService(store, nil)
+		created, _ := svc.Create(ctx, TaskCreate{Title: "t", Comment: "first"})
+
+		updatedTxt := "second"
+		updated, _ := svc.Update(ctx, created.ID, TaskPatch{Comment: &updatedTxt})
+		if updated.Comment != "second" {
+			t.Errorf("Comment: %q", updated.Comment)
+		}
+
+		cleared, _ := svc.Update(ctx, created.ID, TaskPatch{ClearComment: true})
+		if cleared.Comment != "" {
+			t.Errorf("ClearComment failed: %q", cleared.Comment)
+		}
+	})
 }

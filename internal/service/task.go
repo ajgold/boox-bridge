@@ -86,19 +86,46 @@ func (s *taskService) Get(ctx context.Context, id string) (Task, error) {
 	return mapInternalTask(*t), nil
 }
 
-func (s *taskService) Create(ctx context.Context, title string, dueAt *time.Time) (Task, error) {
+func (s *taskService) Create(ctx context.Context, input TaskCreate) (Task, error) {
 	if s.store == nil {
 		return Task{}, fmt.Errorf("task store not available")
 	}
+	if input.Title == "" {
+		return Task{}, fmt.Errorf("title is required")
+	}
 	now := time.Now().UnixMilli()
 	t := &taskstore.Task{
-		TaskID:    taskstore.GenerateTaskID(title, now),
-		Title:     taskstore.SqlStr(title),
+		TaskID:    taskstore.GenerateTaskID(input.Title, now),
+		Title:     taskstore.SqlStr(input.Title),
 		Status:    taskstore.SqlStr("needsAction"),
 		IsDeleted: "N",
 	}
-	if dueAt != nil {
-		t.DueTime = dueAt.UnixMilli()
+	if input.DueAt != nil {
+		t.DueTime = input.DueAt.UnixMilli()
+	}
+	if input.Detail != "" {
+		t.Detail = taskstore.SqlStr(input.Detail)
+	}
+	// URL → tasks.links column (existing). Priority → tasks.importance
+	// (existing). Both are structured-column-only on write; the blob is
+	// reserved for list-shaped (categories) and free-form (comment) values.
+	if input.URL != "" {
+		t.Links = taskstore.SqlStr(input.URL)
+	}
+	if input.Priority != "" {
+		t.Importance = taskstore.SqlStr(input.Priority)
+	}
+	// CATEGORIES + COMMENT have no structured column — stash them in a
+	// minimal blob so they survive a get_task immediately after create
+	// (without waiting for a CalDAV device round-trip to write a "real" blob).
+	if len(input.Categories) > 0 || input.Comment != "" {
+		blob := caldav.BuildBlobWithMetadata(t.TaskID, caldav.BlobMetadata{
+			Categories: input.Categories,
+			Comment:    input.Comment,
+		})
+		if blob != "" {
+			t.ICalBlob = taskstore.SqlStr(blob)
+		}
 	}
 
 	if err := s.store.Create(ctx, t); err != nil {
@@ -136,6 +163,48 @@ func (s *taskService) Update(ctx context.Context, id string, patch TaskPatch) (T
 	}
 	if patch.Detail != nil {
 		t.Detail = taskstore.SqlStr(*patch.Detail)
+	}
+	switch {
+	case patch.ClearURL:
+		t.Links = taskstore.SqlStr("")
+	case patch.URL != nil:
+		t.Links = taskstore.SqlStr(*patch.URL)
+	}
+	switch {
+	case patch.ClearPriority:
+		t.Importance = taskstore.SqlStr("")
+	case patch.Priority != nil:
+		t.Importance = taskstore.SqlStr(*patch.Priority)
+	}
+
+	// Blob-overlaid metadata (CATEGORIES, COMMENT): only touch the blob when
+	// the patch actually carries one of these fields. Preserves any other
+	// blob-only properties (X-FORESTNOTE-*, etc.) on tasks that arrived via
+	// CalDAV PUT.
+	if patch.Categories != nil || patch.Comment != nil || patch.ClearComment {
+		existing := ""
+		if t.ICalBlob.Valid {
+			existing = t.ICalBlob.String
+		}
+		// Start from existing blob's metadata so unspecified fields survive
+		// the merge. ParseBlobMetadata returns zero-values on parse failure,
+		// which is fine — the merge falls back to a fresh build.
+		meta := caldav.ParseBlobMetadata(existing)
+		if patch.Categories != nil {
+			meta.Categories = *patch.Categories
+		}
+		switch {
+		case patch.ClearComment:
+			meta.Comment = ""
+		case patch.Comment != nil:
+			meta.Comment = *patch.Comment
+		}
+		merged := caldav.MergeBlobMetadata(t.TaskID, existing, meta)
+		if merged == "" {
+			t.ICalBlob = sql.NullString{Valid: false}
+		} else {
+			t.ICalBlob = taskstore.SqlStr(merged)
+		}
 	}
 
 	if err := s.store.Update(ctx, t); err != nil {
@@ -288,9 +357,9 @@ func mapInternalTask(it taskstore.Task) Task {
 		}
 	}
 
-	// Categories + native URL live in the blob (no structured column). Parse
-	// on-read; ParseBlobMetadata returns zero values on any failure so this
-	// path can never crash the response. Blank blob is the common case.
+	// Categories + native URL + comment live in the blob (no structured column).
+	// Parse on-read; ParseBlobMetadata returns zero values on any failure so
+	// this path can never crash the response. Blank blob is the common case.
 	if it.ICalBlob.Valid && it.ICalBlob.String != "" {
 		meta := caldav.ParseBlobMetadata(it.ICalBlob.String)
 		if len(meta.Categories) > 0 {
@@ -301,6 +370,9 @@ func mapInternalTask(it taskstore.Task) Task {
 				t.ForestNote = &TaskForestNote{}
 			}
 			t.ForestNote.NativeURL = meta.NativeURL
+		}
+		if meta.Comment != "" {
+			t.Comment = meta.Comment
 		}
 	}
 
