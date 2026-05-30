@@ -153,6 +153,10 @@ func (h *hwrClient) callOnce(ctx context.Context, model string, pagePNGs [][]byt
 	if err != nil {
 		return nil, err
 	}
+	if resp.StatusCode == http.StatusTooManyRequests {
+		delay := parseRetryAfter(resp.Header.Get("Retry-After"))
+		return nil, &rateLimitErr{RetryAfter: delay, Message: snippet(rb)}
+	}
 	if resp.StatusCode/100 != 2 {
 		return nil, fmt.Errorf("gateway %d: %s", resp.StatusCode, snippet(rb))
 	}

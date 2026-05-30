@@ -20,8 +20,11 @@ type config struct {
 	MaxDailyUSD                  float64
 	MaxPagesPerNote              int
 	DebounceSeconds              int
-	NeedsReviewIllegibleThreshold int // prefix "[needs review]" when HWR illegible_count exceeds this
-	OwnerLabel                   string // logical owner ("claire") — also the inbox subdir
+	NeedsReviewIllegibleThreshold int    // prefix "[needs review]" when HWR illegible_count exceeds this
+	MaxRetries                    int    // retry-spool gives up after this many attempts
+	DefaultRetryAfterSeconds      int    // fallback delay when 429 doesn't include Retry-After
+	WebListenAddr                 string // web UI listen address (empty = disabled)
+	OwnerLabel                    string // logical owner ("claire") — also the inbox subdir
 }
 
 func loadConfig() (*config, error) {
@@ -39,6 +42,9 @@ func loadConfig() (*config, error) {
 		DebounceSeconds:               envInt("DEBOUNCE_SECONDS", 10),
 		MaxPagesPerNote:               envInt("MAX_PAGES_PER_NOTE", 25),
 		NeedsReviewIllegibleThreshold: envInt("NEEDS_REVIEW_ILLEGIBLE_THRESHOLD", 5),
+		MaxRetries:                    envInt("MAX_RETRIES", 8),
+		DefaultRetryAfterSeconds:      envInt("DEFAULT_RETRY_AFTER_SECONDS", 90),
+		WebListenAddr:                 envOr("WEB_LISTEN_ADDR", ":3000"),
 	}
 	if v := os.Getenv("MAX_DAILY_LLM_USD"); v != "" {
 		f, err := strconv.ParseFloat(v, 64)
@@ -68,6 +74,7 @@ func (c *config) ArchiveDir() string { return filepath.Join(c.DataDir, "archive"
 func (c *config) DLQDir() string     { return filepath.Join(c.DataDir, "dlq") }
 func (c *config) StateDir() string   { return filepath.Join(c.DataDir, "state") }
 func (c *config) RendersDir() string { return filepath.Join(c.DataDir, "renders") }
+func (c *config) RetryDir() string   { return filepath.Join(c.DataDir, "retry") }
 
 func envOr(k, def string) string {
 	if v := os.Getenv(k); v != "" {

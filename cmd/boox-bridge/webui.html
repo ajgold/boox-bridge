@@ -1,0 +1,179 @@
+<!DOCTYPE html>
+<html lang="en-AU">
+<head>
+<meta charset="UTF-8">
+<title>boox-bridge queue</title>
+<style>
+  :root {
+    --bg: #fafaf7; --fg: #1a1a1a; --muted: #5a5a5a;
+    --accent: #6b4226; --accent-soft: #e8dccd;
+    --ok: #2d6a4f; --warn: #b45309; --bad: #9b2226;
+    --border: #d9d2c2; --code-bg: #f1ede6;
+  }
+  * { box-sizing: border-box; }
+  body {
+    font-family: -apple-system, "Helvetica Neue", system-ui, sans-serif;
+    background: var(--bg); color: var(--fg);
+    margin: 0; padding: 1.5rem; font-size: 14px;
+  }
+  header { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 1rem; border-bottom: 2px solid var(--accent); padding-bottom: 0.6rem; }
+  h1 { font-size: 1.4rem; color: var(--accent); margin: 0; }
+  .meta { color: var(--muted); font-size: 0.85rem; }
+  .meta strong { color: var(--fg); }
+  section { background: white; border: 1px solid var(--border); border-radius: 6px; margin-bottom: 1rem; }
+  section h2 { margin: 0; padding: 0.6rem 1rem; background: var(--accent-soft); color: var(--accent); font-size: 0.95rem; border-radius: 6px 6px 0 0; display: flex; justify-content: space-between; align-items: center; }
+  section h2 .count { font-family: monospace; font-size: 0.85rem; color: var(--muted); }
+  table { width: 100%; border-collapse: collapse; }
+  th, td { padding: 0.45rem 0.8rem; text-align: left; border-bottom: 1px solid var(--border); vertical-align: top; }
+  th { background: #f5efe2; font-weight: 600; color: var(--muted); font-size: 0.8rem; text-transform: uppercase; letter-spacing: 0.04em; }
+  tr:last-child td { border-bottom: none; }
+  tr:hover td { background: #faf6ec; }
+  .empty { padding: 1rem; text-align: center; color: var(--muted); font-style: italic; }
+  .name { font-family: "JetBrains Mono", Menlo, monospace; font-size: 0.85em; word-break: break-all; }
+  .err { font-family: monospace; font-size: 0.78em; color: var(--bad); max-width: 30em; white-space: pre-wrap; word-break: break-word; }
+  button {
+    font-family: inherit; font-size: 0.78rem; padding: 0.25rem 0.6rem;
+    border: 1px solid var(--border); background: white; color: var(--fg);
+    border-radius: 3px; cursor: pointer; margin-right: 0.2rem;
+  }
+  button:hover { background: var(--accent-soft); }
+  button.danger { color: var(--bad); border-color: var(--bad); }
+  button.danger:hover { background: #f6dada; }
+  button.primary { color: var(--ok); border-color: var(--ok); }
+  button.primary:hover { background: #e6f0e9; }
+  .actions { white-space: nowrap; }
+  #toast {
+    position: fixed; right: 1rem; bottom: 1rem;
+    background: var(--fg); color: white;
+    padding: 0.6rem 1rem; border-radius: 4px; font-size: 0.85rem;
+    opacity: 0; transition: opacity 0.2s; pointer-events: none;
+  }
+  #toast.show { opacity: 1; }
+  .pill { display: inline-block; padding: 0.05rem 0.4rem; border-radius: 99px; font-size: 0.7em; font-weight: 600; }
+  .pill.warn { background: #fbe9d0; color: var(--warn); }
+  .pill.bad  { background: #f6dada; color: var(--bad); }
+  footer { color: var(--muted); font-size: 0.8em; margin-top: 1rem; text-align: center; }
+</style>
+</head>
+<body>
+<header>
+  <h1>boox-bridge queue</h1>
+  <div class="meta">
+    spend today <strong id="spend">—</strong> / <strong id="cap">—</strong>
+    · seen <strong id="seen">—</strong>
+    · refreshes every 5s
+  </div>
+</header>
+
+<section>
+  <h2>Inbox <span class="count" id="inbox-count">—</span></h2>
+  <table id="inbox-table"><thead><tr><th>File</th><th>Size</th><th>Modified</th><th></th></tr></thead><tbody></tbody></table>
+</section>
+
+<section>
+  <h2>Retry queue <span class="count" id="retry-count">—</span></h2>
+  <table id="retry-table"><thead><tr><th>File</th><th>Size</th><th>Attempt</th><th>Next attempt</th><th>Last error</th><th></th></tr></thead><tbody></tbody></table>
+</section>
+
+<section>
+  <h2>Dead-letter queue <span class="count" id="dlq-count">—</span></h2>
+  <table id="dlq-table"><thead><tr><th>File</th><th>Size</th><th>Failed at</th><th>Last error</th><th></th></tr></thead><tbody></tbody></table>
+</section>
+
+<footer>boox-bridge web UI · drop notes via WebDAV at <code>webdav.jacomail.com/claire/</code></footer>
+
+<div id="toast"></div>
+
+<script>
+const fmtSize = b => b < 1024 ? b + " B" : b < 1024*1024 ? (b/1024).toFixed(1) + " KB" : (b/(1024*1024)).toFixed(1) + " MB";
+const fmtTime = iso => {
+  if (!iso) return "—";
+  const d = new Date(iso);
+  if (isNaN(d.getTime())) return iso;
+  const now = Date.now();
+  const delta = (d.getTime() - now) / 1000;
+  const ago = Math.abs(delta);
+  const sign = delta < 0 ? "ago" : "from now";
+  if (ago < 60) return Math.round(ago) + "s " + sign;
+  if (ago < 3600) return Math.round(ago/60) + "m " + sign;
+  if (ago < 86400) return Math.round(ago/3600) + "h " + sign;
+  return d.toLocaleString();
+};
+const esc = s => (s ?? "").toString().replace(/[<>&]/g, c => ({"<":"&lt;",">":"&gt;","&":"&amp;"}[c]));
+const toast = msg => {
+  const t = document.getElementById("toast");
+  t.textContent = msg;
+  t.classList.add("show");
+  setTimeout(() => t.classList.remove("show"), 2200);
+};
+
+async function act(verb, queue, name) {
+  if (verb === "delete" && !confirm(`Delete ${name} from ${queue}?`)) return;
+  if (verb === "skip" && !confirm(`Skip ${name}? It will be marked as already-seen and archived without HWR.`)) return;
+  const fd = new URLSearchParams({queue, file: name});
+  try {
+    const r = await fetch(`/api/${verb}?${fd}`, {method: "POST"});
+    const j = await r.json();
+    if (j.ok) { toast(j.message || (verb + " ok")); refresh(); }
+    else toast("error: " + (j.error || r.statusText));
+  } catch (e) { toast("network error: " + e.message); }
+}
+
+function row(queue, e) {
+  const tr = document.createElement("tr");
+  let cells = `<td class="name">${esc(e.name)}</td><td>${fmtSize(e.size)}</td>`;
+  if (queue === "inbox") {
+    cells += `<td>${fmtTime(e.mtime)}</td>`;
+    cells += `<td class="actions">
+      <button onclick="act('skip','inbox','${esc(e.name)}')">Skip</button>
+      <button class="danger" onclick="act('delete','inbox','${esc(e.name)}')">Delete</button>
+    </td>`;
+  } else if (queue === "retry") {
+    cells += `<td><span class="pill warn">${e.attempt}/${e.max}</span></td>`;
+    cells += `<td>${fmtTime(e.next_attempt_at)}</td>`;
+    cells += `<td class="err">${esc(e.last_error || "")}</td>`;
+    cells += `<td class="actions">
+      <button class="primary" onclick="act('retry','retry','${esc(e.name)}')">Retry now</button>
+      <button class="danger" onclick="act('delete','retry','${esc(e.name)}')">Delete</button>
+    </td>`;
+  } else if (queue === "dlq") {
+    cells += `<td>${fmtTime(e.mtime)}</td>`;
+    cells += `<td class="err">${esc(e.last_error || "(unknown)")}</td>`;
+    cells += `<td class="actions">
+      <button class="primary" onclick="act('retry','dlq','${esc(e.name)}')">Retry</button>
+      <button onclick="act('skip','dlq','${esc(e.name)}')">Skip</button>
+      <button class="danger" onclick="act('delete','dlq','${esc(e.name)}')">Delete</button>
+    </td>`;
+  }
+  tr.innerHTML = cells;
+  return tr;
+}
+
+async function refresh() {
+  try {
+    const r = await fetch("/api/state");
+    if (!r.ok) throw new Error("HTTP " + r.status);
+    const s = await r.json();
+    document.getElementById("spend").textContent = "$" + (s.spend_today_usd || 0).toFixed(3);
+    document.getElementById("cap").textContent = "$" + (s.max_daily_usd || 0).toFixed(2);
+    document.getElementById("seen").textContent = s.seen_count ?? "—";
+    for (const q of ["inbox", "retry", "dlq"]) {
+      const list = s[q] || [];
+      document.getElementById(q + "-count").textContent = list.length;
+      const tbody = document.querySelector(`#${q}-table tbody`);
+      tbody.innerHTML = "";
+      if (list.length === 0) {
+        const colspan = q === "inbox" ? 4 : q === "retry" ? 6 : 5;
+        tbody.innerHTML = `<tr><td colspan="${colspan}" class="empty">empty</td></tr>`;
+      } else {
+        for (const e of list) tbody.appendChild(row(q, e));
+      }
+    }
+  } catch (e) { toast("refresh failed: " + e.message); }
+}
+
+refresh();
+setInterval(refresh, 5000);
+</script>
+</body>
+</html>

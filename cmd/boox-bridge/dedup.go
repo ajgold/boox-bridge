@@ -53,6 +53,13 @@ func hashFile(path string) (string, error) {
 	return hex.EncodeToString(h.Sum(nil)), nil
 }
 
+// size returns the number of hashes currently in the skip-list.
+func (d *dedup) size() int {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return len(d.seen)
+}
+
 // has reports whether the hash is already in the skip-list.
 func (d *dedup) has(hash string) bool {
 	d.mu.Lock()

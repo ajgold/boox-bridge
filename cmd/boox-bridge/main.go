@@ -50,6 +50,7 @@ func main() {
 	hwr := newHWRClient(cfg)
 	hwr.spend = spend
 	affine := newAffineClient(cfg)
+	spool := newSpool(cfg)
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
@@ -68,7 +69,17 @@ func main() {
 		spend:  spend,
 		hwr:    hwr,
 		affine: affine,
+		spool:  spool,
 	}
+
+	go spool.run(ctx)
+
+	web := newWebServer(cfg, dedup, spend)
+	go func() {
+		if err := web.listen(ctx); err != nil {
+			slog.Error("web_ui_exit", "err", err)
+		}
+	}()
 
 	if err := watch(ctx, cfg, pipe.process); err != nil {
 		slog.Error("watcher_exit", "err", err)

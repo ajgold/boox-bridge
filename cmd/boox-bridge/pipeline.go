@@ -24,6 +24,7 @@ type pipeline struct {
 	spend  *spend
 	hwr    *hwrClient
 	affine *affineClient
+	spool  *spool
 }
 
 // process runs the full ingest pipeline on a single .note file. Each
@@ -94,6 +95,22 @@ func (p *pipeline) process(ctx context.Context, path string) {
 	tHWR := time.Now()
 	hwrRes, err := p.hwr.transcribe(ctx, pageImgs)
 	if err != nil {
+		// Rate-limit failures aren't real failures — defer via the spool.
+		var rle *rateLimitErr
+		if errors.As(err, &rle) {
+			attempt, schedErr := p.spool.schedule(path, rle.RetryAfter, err.Error())
+			if schedErr == nil {
+				log.Info("retry_scheduled", "stage", "hwr", "attempt", attempt,
+					"delay_s", int(rle.RetryAfter.Seconds()),
+					"upstream", rle.Message)
+				return
+			}
+			if errors.Is(schedErr, errRetryExhausted) {
+				p.fail(log, path, "hwr_retries_exhausted", err, t0)
+				return
+			}
+			log.Warn("spool_schedule_failed", "err", schedErr)
+		}
 		p.fail(log, path, "hwr", err, t0)
 		return
 	}

@@ -10,7 +10,7 @@ import (
 // reachable: data dirs, LLM gateway, Affine MCP. Better to exit(1) than
 // to silently DLQ every note that arrives.
 func startupSelfCheck(ctx context.Context, cfg *config, hwr *hwrClient, aff *affineClient) error {
-	for _, d := range []string{cfg.InboxDir(), cfg.ArchiveDir(), cfg.DLQDir(), cfg.StateDir(), cfg.RendersDir()} {
+	for _, d := range []string{cfg.InboxDir(), cfg.ArchiveDir(), cfg.DLQDir(), cfg.StateDir(), cfg.RendersDir(), cfg.RetryDir()} {
 		if err := os.MkdirAll(d, 0o750); err != nil {
 			return fmt.Errorf("mkdir %s: %w", d, err)
 		}
