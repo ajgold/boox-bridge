@@ -126,6 +126,13 @@
         <div></div>
       </div>
 
+      <h3 style="margin: 1rem 0 0.4rem; font-size: 0.85rem; color: var(--muted); text-transform: uppercase; letter-spacing: 0.06em;">Workspace labels</h3>
+      <div style="font-size: 0.8em; color: var(--muted); margin-bottom: 0.4rem;">Affine doesn't expose workspace names through its API. Give each workspace a friendly label below; it'll show in the dropdowns above instead of the raw UUID.</div>
+      <table id="labels-table" class="mappings-table">
+        <thead><tr><th style="width: 20em;">Workspace ID</th><th>Label</th></tr></thead>
+        <tbody></tbody>
+      </table>
+
       <h3 style="margin: 1rem 0 0.4rem; font-size: 0.85rem; color: var(--muted); text-transform: uppercase; letter-spacing: 0.06em;">Tag mappings (first match wins; top of list = highest priority)</h3>
       <div id="mappings-list"></div>
       <div style="margin-top: 0.4rem;">
@@ -269,7 +276,7 @@ async function refresh() {
 
 // --- Routing UI ---
 
-let routes = { default: { workspace_id: "", parent_doc_id: "" }, mappings: [] };
+let routes = { default: { workspace_id: "", parent_doc_id: "" }, mappings: [], workspace_labels: {} };
 let workspaces = []; // [{id, createdAt}]
 let docCacheByWS = {}; // wsId -> [{id, title, createdAt}]
 let isDirty = false;
@@ -325,10 +332,20 @@ async function refreshDiscovery() {
 }
 
 function workspaceLabel(id) {
+  if (!id) return "";
+  const friendly = routes.workspace_labels && routes.workspace_labels[id];
+  if (friendly) return friendly;
   const w = workspaces.find(w => w.id === id);
   if (!w) return id;
-  // Affine doesn't expose a name; use a short prefix + createdAt
   return id.slice(0, 8) + "… (created " + (w.createdAt ? w.createdAt.slice(0, 10) : "?") + ")";
+}
+function workspaceItems() {
+  return workspaces.map(w => {
+    const friendly = routes.workspace_labels && routes.workspace_labels[w.id];
+    return friendly
+      ? { id: w.id, primary: friendly, secondary: w.id }
+      : { id: w.id, primary: w.id.slice(0, 12) + "…", secondary: "created " + (w.createdAt || "").slice(0, 10) };
+  });
 }
 function docLabel(wsId, docId) {
   if (!docId) return "";
@@ -339,6 +356,9 @@ function docLabel(wsId, docId) {
 }
 
 function renderRouting() {
+  if (!routes.workspace_labels) routes.workspace_labels = {};
+  renderLabels();
+
   // banner
   const banner = document.getElementById("routing-banner");
   if (routes.mappings.length === 0) {
@@ -349,7 +369,7 @@ function renderRouting() {
 
   // default row
   setupCombobox("default-workspace", "default-workspace-suggestions",
-    workspaces.map(w => ({id: w.id, primary: w.id.slice(0, 12) + "…", secondary: "created " + (w.createdAt || "").slice(0, 10)})),
+    workspaceItems(),
     routes.default.workspace_id,
     (newId) => { routes.default.workspace_id = newId; routes.default.parent_doc_id = ""; ensureDocsLoaded(newId); setDirty(true); renderRouting(); },
     { minChars: 0 });
@@ -387,7 +407,7 @@ function renderRouting() {
     `;
     list.appendChild(row);
     setupCombobox("map-ws-" + idx, "map-ws-" + idx + "-suggestions",
-      workspaces.map(w => ({id: w.id, primary: w.id.slice(0, 12) + "…", secondary: "created " + (w.createdAt || "").slice(0, 10)})),
+      workspaceItems(),
       m.workspace_id,
       (newId) => { routes.mappings[idx].workspace_id = newId; routes.mappings[idx].parent_doc_id = ""; ensureDocsLoaded(newId).then(renderRouting); setDirty(true); },
       { minChars: 0 });
@@ -397,7 +417,41 @@ function renderRouting() {
   });
 }
 
-function setMappingTag(idx, val) { routes.mappings[idx].tag = val; setDirty(true); }
+function renderLabels() {
+  const tbody = document.querySelector("#labels-table tbody");
+  tbody.innerHTML = "";
+  // Show every known workspace from the list, plus any IDs already referenced
+  // in routes config that aren't in the list (e.g. labelled but listing failed).
+  const ids = new Set(workspaces.map(w => w.id));
+  if (routes.default && routes.default.workspace_id) ids.add(routes.default.workspace_id);
+  for (const m of routes.mappings) if (m.workspace_id) ids.add(m.workspace_id);
+  for (const k of Object.keys(routes.workspace_labels || {})) ids.add(k);
+  if (ids.size === 0) {
+    tbody.innerHTML = `<tr><td colspan="2" class="empty">no workspaces discovered yet</td></tr>`;
+    return;
+  }
+  for (const id of Array.from(ids).sort()) {
+    const tr = document.createElement("tr");
+    const cur = (routes.workspace_labels && routes.workspace_labels[id]) || "";
+    tr.innerHTML = `
+      <td class="name">${esc(id)}</td>
+      <td><input type="text" placeholder="(unlabelled)" value="${esc(cur)}"
+           oninput="setLabel('${esc(id)}', this.value)"></td>
+    `;
+    tbody.appendChild(tr);
+  }
+}
+
+function setLabel(id, val) {
+  if (!routes.workspace_labels) routes.workspace_labels = {};
+  const trimmed = val.trim();
+  if (trimmed === "") delete routes.workspace_labels[id];
+  else routes.workspace_labels[id] = trimmed;
+  setDirty(true);
+  // Don't re-render the labels table on every keystroke — the focused input
+  // would lose focus. Only re-render the default + mappings rows so the
+  // friendly label propagates to the comboboxes' displayed values on save.
+}
 function moveMapping(idx, dir) {
   const tgt = idx + dir;
   if (tgt < 0 || tgt >= routes.mappings.length) return;

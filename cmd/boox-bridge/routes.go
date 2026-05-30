@@ -25,8 +25,9 @@ type routeMapping struct {
 
 // routesConfig is the persisted form on disk.
 type routesConfig struct {
-	Default  routeTarget    `json:"default"`
-	Mappings []routeMapping `json:"mappings"`
+	Default         routeTarget       `json:"default"`
+	Mappings        []routeMapping    `json:"mappings"`
+	WorkspaceLabels map[string]string `json:"workspace_labels,omitempty"` // user-defined friendly names for the workspace dropdowns
 }
 
 // routes is the in-memory + on-disk router. All access serialises through
@@ -139,6 +140,12 @@ func (r *routes) Get() routesConfig {
 	defer r.mu.RUnlock()
 	out := routesConfig{Default: r.cfg.Default}
 	out.Mappings = append([]routeMapping(nil), r.cfg.Mappings...)
+	if len(r.cfg.WorkspaceLabels) > 0 {
+		out.WorkspaceLabels = make(map[string]string, len(r.cfg.WorkspaceLabels))
+		for k, v := range r.cfg.WorkspaceLabels {
+			out.WorkspaceLabels[k] = v
+		}
+	}
 	return out
 }
 
