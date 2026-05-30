@@ -1,6 +1,6 @@
 # Task Database
 
-Last verified: 2026-04-04
+Last verified: 2026-05-29 (ForestNote provenance columns + hard-purge path)
 
 ## Purpose
 Opens and migrates the SQLite database used for task storage.
@@ -8,8 +8,15 @@ Implements the `caldav.TaskStore` interface for CalDAV and web UI task operation
 
 ## Contracts
 - **Exposes**: `Open(ctx, path) (*sql.DB, error)` -- opens/creates SQLite DB, applies migrations, returns pool. `NewStore(db) *Store` -- creates TaskStore implementation.
-- **Guarantees**: WAL mode and foreign keys enabled. Schema is idempotent (safe to call on existing DB). MaxOpenConns=1 (SQLite single-writer). Implements all 6 `caldav.TaskStore` methods. Uses `taskstore.ErrNotFound` sentinel for missing tasks.
+- **Guarantees**: WAL mode and foreign keys enabled. Schema is idempotent (safe to call on existing DB). MaxOpenConns=1 (SQLite single-writer). Implements every `caldav.TaskStore` method plus the extended `service.TaskStore` surface (`ListIncludingDeleted`, `HardDeleteOlderThan`). Uses `taskstore.ErrNotFound` sentinel for missing tasks.
 - **Expects**: Writable filesystem path. Context for cancellation.
+
+## Schema additions (2026-05-29)
+- Four nullable TEXT columns on `tasks` carry ForestNote provenance lifted from inbound X-FORESTNOTE-* VTODO properties: `forestnote_notebook_id`, `forestnote_page_id`, `forestnote_notebook_name`, `forestnote_source`. Columns are added via idempotent `pragma_table_info('tasks')`-guarded ALTERs (same pattern as `task_sync_map.last_seen_at`) so the migration is safe on live deployments.
+- Partial index `idx_tasks_forestnote_notebook ON tasks(forestnote_notebook_id) WHERE forestnote_notebook_id IS NOT NULL` powers the `?notebook_id=` filter on `/api/v1/tasks` and the `list_tasks` MCP tool. Created **after** the ALTERs (see schema.go comment) — referencing a column inside `stmts[]` would fail on a pre-ForestNote DB.
+
+## Hard-purge contract
+- `HardDeleteOlderThan(ctx, cutoffMs) (int64, error)` is the **only** code path in the repo that issues `DELETE FROM tasks`. Every other "delete" is a soft tombstone (`is_deleted='Y'`). Predicate is `is_deleted = 'Y' AND last_modified < cutoffMs`; caller picks the cutoff. No VACUUM — space reclamation is left to SQLite's incremental free-page reuse and out-of-band maintenance.
 
 ## Dependencies
 - **Uses**: `modernc.org/sqlite` (pure-Go, no CGO), `taskstore` (Task model, ErrNotFound, mapping helpers)

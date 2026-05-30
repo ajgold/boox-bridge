@@ -1,6 +1,6 @@
 # internal/service
 
-Last verified: 2026-05-27
+Last verified: 2026-05-29 (TaskService write surface for URL/Priority/Categories/Comment + ForestNote provenance + hard-purge)
 
 ## Purpose
 
@@ -17,9 +17,21 @@ Five public service interfaces, all defined in `interfaces.go`,
 all implemented by unexported structs and constructed via
 `New*Service` factories:
 
-- **`TaskService`** — task CRUD + bulk + completion. Calls
+- **`TaskService`** — task CRUD + bulk + completion + hard-purge. Calls
   `SyncNotifier.NotifyChange()` after every mutation so device
-  pipelines can push STARTSYNC.
+  pipelines can push STARTSYNC. **`Create` takes a `TaskCreate` struct**
+  (not `(title, dueAt)`) so future write fields don't churn call sites;
+  inputs cover `Title` (required), `DueAt`, `Detail`, `URL`, `Priority`,
+  `Categories`, `Comment`. **`TaskPatch`** carries `URL`/`Priority`/
+  `Categories`/`Comment` plus `Clear{URL,Priority,Comment}` sentinels —
+  Categories is wholesale (nil = unchanged, non-nil incl. empty slice =
+  replace). **`ListIncludingDeleted`** surfaces soft-tombstoned rows
+  alongside live ones (the `Deleted bool` on each `Task` distinguishes
+  them); the default `List` still hides them. **`PurgeDeleted(ctx,
+  olderThanDays) (int64, error)`** is the irreversible end of the
+  pipeline — rejects `olderThanDays <= 0`, does NOT notify (rows were
+  already tombstoned for sync); delegates to
+  `TaskStore.HardDeleteOlderThan`.
 - **`NoteService`** — file listing (Supernote tree, Boox catalog,
   ForestNote folder tree), content, page rendering, pipeline
   start/stop, bulk import. Nil-safe: `HasSupernoteSource()` /
@@ -73,11 +85,31 @@ all implemented by unexported structs and constructed via
   history, versions, content): keeps the service interfaces from
   pulling in every concrete domain type. Web handlers type-assert
   at the call site.
-- **`TaskPatch` uses pointer fields + separate `ClearDueAt` bool**:
-  a `*time.Time` can't distinguish "leave unchanged" from "clear
-  to null". `Title` is intentionally non-clearable — CalDAV VTODOs
-  require a `SUMMARY` and empty titles round-trip badly to the
-  device. `Detail` clears on `""`.
+- **`TaskPatch` uses pointer fields + separate `Clear*` bools**:
+  a `*time.Time` / `*string` can't distinguish "leave unchanged" from
+  "clear to null". `Title` is intentionally non-clearable — CalDAV
+  VTODOs require a `SUMMARY` and empty titles round-trip badly to the
+  device. `Detail` and `Comment` clear on `""`. URL/Priority/Comment
+  each get a `Clear*` flag (Clear wins over the value pointer when both
+  are set); `Categories` is wholesale (`*[]string`: nil = unchanged,
+  non-nil incl. `[]` = replace).
+- **Two storage targets for write fields**: `URL` lands in
+  `tasks.links` (structured column), `Priority` in `tasks.importance`
+  (structured column). `Categories` and `Comment` have no structured
+  column — they ride in the `ical_blob` via
+  `caldav.BuildBlobWithMetadata` (Create) or
+  `caldav.MergeBlobMetadataPatch` (Update). The merge layer preserves
+  every other blob property (X-FORESTNOTE-*, PRIORITY, VALARM, etc.)
+  so writes through the REST/MCP surface don't trample CalDAV-PUT
+  history.
+- **`TaskForestNote` is read-only on the service surface**: provenance
+  comes in via the CalDAV PUT path (the `X-FORESTNOTE-*` extractor in
+  `caldav.VTODOToTask`), never via the REST/MCP write API. The block
+  is nil when no structured column is populated, so non-FN tasks drop
+  the field entirely via `omitempty`. `NativeURL` is parsed from the
+  blob on read and only attached when the structured columns confirm
+  FN origin (a blob-only NativeURL with no column-side provenance
+  would conjure a misleading block).
 - **No domain logic in services**: services orchestrate stores +
   pipelines and translate types between layers. Business rules
   live in the underlying packages (e.g. CalDAV soft-delete is in

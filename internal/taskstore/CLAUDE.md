@@ -1,6 +1,6 @@
 # Task Store
 
-Last verified: 2026-04-04
+Last verified: 2026-05-29 (Task model gained CreatedAt + ForestNote* fields)
 
 ## Purpose
 CRUD access to Supernote's `t_schedule_task` table with field mapping between
@@ -28,7 +28,9 @@ Go types, CalDAV VTODO properties, and the Supernote DB schema.
 - `is_reminder_on` defaults to "N"
 - `status` is "needsAction" or "completed" (Supernote values, not CalDAV casing)
 - `ical_blob` (ICalBlob field) is optional and NULL for tasks from Supernote; populated by CalDAV write path for round-trip VTODO fidelity
+- `CreatedAt` (int64 ms UTC) and the four `ForestNote*` nullable strings are **taskdb-only** — they mirror columns that only exist in UB's `tasks` table. The SPC mapping layer (`internal/spcserver/mapping`) leaves them at zero / `sql.NullString{}` and the device-side `t_schedule_task` schema is unchanged.
 
 ## Gotchas
 - `ErrNotFound` sentinel: use `taskstore.IsNotFound(err)` to check, not type assertion
 - CompletionTime reads from last_modified, NOT completed_time
+- The REST API's `created_at` field is sourced from `Task.CreatedAt`; prior to 2026-05-29 it was mis-mapped from `DueTime`. Code reading the old field via `mapInternalTask` must use the new column.
