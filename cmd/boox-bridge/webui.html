@@ -21,10 +21,13 @@
   .meta { color: var(--muted); font-size: 0.85rem; }
   .meta strong { color: var(--fg); }
   section { background: white; border: 1px solid var(--border); border-radius: 6px; margin-bottom: 1rem; }
-  section h2 { margin: 0; padding: 0.6rem 1rem; background: var(--accent-soft); color: var(--accent); font-size: 0.95rem; border-radius: 6px 6px 0 0; display: flex; justify-content: space-between; align-items: center; }
-  section h2 .count { font-family: monospace; font-size: 0.85rem; color: var(--muted); }
+  section h2 { margin: 0; padding: 0.6rem 1rem; background: var(--accent-soft); color: var(--accent); font-size: 0.95rem; border-radius: 6px 6px 0 0; display: flex; justify-content: space-between; align-items: center; cursor: pointer; user-select: none; }
+  section h2 .count, section h2 .hint { font-family: monospace; font-size: 0.85rem; color: var(--muted); }
+  section h2 .hint { font-family: inherit; font-style: italic; }
+  section .body { padding: 0; }
+  section.collapsed .body { display: none; }
   table { width: 100%; border-collapse: collapse; }
-  th, td { padding: 0.45rem 0.8rem; text-align: left; border-bottom: 1px solid var(--border); vertical-align: top; }
+  th, td { padding: 0.45rem 0.8rem; text-align: left; border-bottom: 1px solid var(--border); vertical-align: middle; }
   th { background: #f5efe2; font-weight: 600; color: var(--muted); font-size: 0.8rem; text-transform: uppercase; letter-spacing: 0.04em; }
   tr:last-child td { border-bottom: none; }
   tr:hover td { background: #faf6ec; }
@@ -37,22 +40,60 @@
     border-radius: 3px; cursor: pointer; margin-right: 0.2rem;
   }
   button:hover { background: var(--accent-soft); }
+  button:disabled { opacity: 0.4; cursor: not-allowed; }
   button.danger { color: var(--bad); border-color: var(--bad); }
   button.danger:hover { background: #f6dada; }
   button.primary { color: var(--ok); border-color: var(--ok); }
   button.primary:hover { background: #e6f0e9; }
+  button.save { background: var(--accent); color: white; border-color: var(--accent); font-weight: 600; padding: 0.4rem 1rem; }
+  button.save:hover { background: #5a341c; }
+  button.save:disabled { background: var(--border); border-color: var(--border); color: white; }
   .actions { white-space: nowrap; }
   #toast {
     position: fixed; right: 1rem; bottom: 1rem;
     background: var(--fg); color: white;
     padding: 0.6rem 1rem; border-radius: 4px; font-size: 0.85rem;
-    opacity: 0; transition: opacity 0.2s; pointer-events: none;
+    opacity: 0; transition: opacity 0.2s; pointer-events: none; max-width: 32rem;
   }
   #toast.show { opacity: 1; }
   .pill { display: inline-block; padding: 0.05rem 0.4rem; border-radius: 99px; font-size: 0.7em; font-weight: 600; }
   .pill.warn { background: #fbe9d0; color: var(--warn); }
   .pill.bad  { background: #f6dada; color: var(--bad); }
   footer { color: var(--muted); font-size: 0.8em; margin-top: 1rem; text-align: center; }
+
+  /* Routing section */
+  .routing-body { padding: 0.8rem 1rem; }
+  .route-row { display: grid; grid-template-columns: 110px 1fr 1fr 90px; gap: 0.5rem; align-items: center; margin-bottom: 0.4rem; }
+  .route-row.mapping { grid-template-columns: 30px 110px 1fr 1fr 90px; }
+  .route-row .tag-cell input { width: 100%; font-family: monospace; }
+  .route-row .label { color: var(--muted); font-size: 0.85em; padding-right: 0.4rem; }
+  .route-row .order { display: flex; flex-direction: column; gap: 0.1rem; }
+  .route-row .order button { padding: 0 0.3rem; font-size: 0.7rem; line-height: 1; }
+  input[type="text"], select {
+    font-family: inherit; font-size: 0.85rem; padding: 0.3rem 0.5rem;
+    border: 1px solid var(--border); border-radius: 3px; background: white; width: 100%;
+  }
+  input[type="text"]:focus, select:focus { outline: none; border-color: var(--accent); }
+  .field-help { color: var(--muted); font-size: 0.72em; margin-top: 0.15rem; }
+  .routing-actions { display: flex; gap: 0.5rem; align-items: center; margin-top: 0.8rem; padding-top: 0.6rem; border-top: 1px solid var(--border); }
+  .routing-actions .spacer { flex: 1; }
+  .banner { background: #fbe9d0; color: var(--warn); padding: 0.4rem 0.6rem; border-radius: 3px; margin-bottom: 0.5rem; font-size: 0.85em; }
+  .mappings-table { width: 100%; }
+  .mappings-empty { padding: 0.6rem; color: var(--muted); font-style: italic; text-align: center; }
+  .doc-search-wrap { position: relative; }
+  .doc-search-suggestions {
+    position: absolute; top: 100%; left: 0; right: 0; z-index: 10;
+    background: white; border: 1px solid var(--border); border-top: none;
+    max-height: 16em; overflow-y: auto; box-shadow: 0 4px 12px rgba(0,0,0,0.08);
+  }
+  .doc-search-suggestions div {
+    padding: 0.3rem 0.5rem; cursor: pointer; font-size: 0.85em;
+    border-bottom: 1px solid var(--border);
+  }
+  .doc-search-suggestions div:last-child { border-bottom: none; }
+  .doc-search-suggestions div:hover { background: var(--accent-soft); }
+  .doc-search-suggestions .doc-title { font-weight: 500; }
+  .doc-search-suggestions .doc-id { font-family: monospace; font-size: 0.8em; color: var(--muted); }
 </style>
 </head>
 <body>
@@ -65,19 +106,61 @@
   </div>
 </header>
 
+<section id="routing-section" class="collapsed">
+  <h2 onclick="toggleSection('routing-section')">Routing <span class="hint" id="routing-hint">click to expand</span></h2>
+  <div class="body">
+    <div class="routing-body">
+      <div id="routing-banner"></div>
+
+      <h3 style="margin: 0 0 0.4rem; font-size: 0.85rem; color: var(--muted); text-transform: uppercase; letter-spacing: 0.06em;">Default (used when no tag mapping matches)</h3>
+      <div class="route-row" id="default-row">
+        <span class="label">Workspace</span>
+        <div class="doc-search-wrap">
+          <input type="text" id="default-workspace" placeholder="select or paste workspace ID" autocomplete="off">
+          <div class="doc-search-suggestions" id="default-workspace-suggestions" style="display:none;"></div>
+        </div>
+        <div class="doc-search-wrap">
+          <input type="text" id="default-parent" placeholder="parent doc (optional — type 2+ chars or paste ID)" autocomplete="off">
+          <div class="doc-search-suggestions" id="default-parent-suggestions" style="display:none;"></div>
+        </div>
+        <div></div>
+      </div>
+
+      <h3 style="margin: 1rem 0 0.4rem; font-size: 0.85rem; color: var(--muted); text-transform: uppercase; letter-spacing: 0.06em;">Tag mappings (first match wins; top of list = highest priority)</h3>
+      <div id="mappings-list"></div>
+      <div style="margin-top: 0.4rem;">
+        <button class="primary" onclick="addMapping()">+ Add mapping</button>
+      </div>
+
+      <div class="routing-actions">
+        <button onclick="refreshDiscovery()">Refresh workspaces &amp; docs</button>
+        <span class="spacer"></span>
+        <span id="dirty-indicator" style="color: var(--warn); font-size: 0.85em;"></span>
+        <button class="save" id="save-routes-btn" onclick="saveRoutes()" disabled>Save routing</button>
+      </div>
+    </div>
+  </div>
+</section>
+
 <section>
   <h2>Inbox <span class="count" id="inbox-count">—</span></h2>
-  <table id="inbox-table"><thead><tr><th>File</th><th>Size</th><th>Modified</th><th></th></tr></thead><tbody></tbody></table>
+  <div class="body">
+    <table id="inbox-table"><thead><tr><th>File</th><th>Size</th><th>Modified</th><th></th></tr></thead><tbody></tbody></table>
+  </div>
 </section>
 
 <section>
   <h2>Retry queue <span class="count" id="retry-count">—</span></h2>
-  <table id="retry-table"><thead><tr><th>File</th><th>Size</th><th>Attempt</th><th>Next attempt</th><th>Last error</th><th></th></tr></thead><tbody></tbody></table>
+  <div class="body">
+    <table id="retry-table"><thead><tr><th>File</th><th>Size</th><th>Attempt</th><th>Next attempt</th><th>Last error</th><th></th></tr></thead><tbody></tbody></table>
+  </div>
 </section>
 
 <section>
   <h2>Dead-letter queue <span class="count" id="dlq-count">—</span></h2>
-  <table id="dlq-table"><thead><tr><th>File</th><th>Size</th><th>Failed at</th><th>Last error</th><th></th></tr></thead><tbody></tbody></table>
+  <div class="body">
+    <table id="dlq-table"><thead><tr><th>File</th><th>Size</th><th>Failed at</th><th>Last error</th><th></th></tr></thead><tbody></tbody></table>
+  </div>
 </section>
 
 <footer>boox-bridge web UI · drop notes via WebDAV at <code>webdav.jacomail.com/claire/</code></footer>
@@ -85,6 +168,7 @@
 <div id="toast"></div>
 
 <script>
+// --- Generic helpers ---
 const fmtSize = b => b < 1024 ? b + " B" : b < 1024*1024 ? (b/1024).toFixed(1) + " KB" : (b/(1024*1024)).toFixed(1) + " MB";
 const fmtTime = iso => {
   if (!iso) return "—";
@@ -104,9 +188,20 @@ const toast = msg => {
   const t = document.getElementById("toast");
   t.textContent = msg;
   t.classList.add("show");
-  setTimeout(() => t.classList.remove("show"), 2200);
+  setTimeout(() => t.classList.remove("show"), 2400);
 };
+const isUUIDish = s => /^[A-Za-z0-9_-]{6,64}$/.test((s || "").trim());
 
+function toggleSection(id) {
+  const s = document.getElementById(id);
+  s.classList.toggle("collapsed");
+  if (id === "routing-section") {
+    const hint = document.getElementById("routing-hint");
+    hint.textContent = s.classList.contains("collapsed") ? "click to expand" : "click to collapse";
+  }
+}
+
+// --- Queue actions ---
 async function act(verb, queue, name) {
   if (verb === "delete" && !confirm(`Delete ${name} from ${queue}?`)) return;
   if (verb === "skip" && !confirm(`Skip ${name}? It will be marked as already-seen and archived without HWR.`)) return;
@@ -172,8 +267,234 @@ async function refresh() {
   } catch (e) { toast("refresh failed: " + e.message); }
 }
 
+// --- Routing UI ---
+
+let routes = { default: { workspace_id: "", parent_doc_id: "" }, mappings: [] };
+let workspaces = []; // [{id, createdAt}]
+let docCacheByWS = {}; // wsId -> [{id, title, createdAt}]
+let isDirty = false;
+
+function setDirty(d) {
+  isDirty = d;
+  document.getElementById("dirty-indicator").textContent = d ? "unsaved changes" : "";
+  document.getElementById("save-routes-btn").disabled = !d;
+}
+
+window.addEventListener("beforeunload", e => {
+  if (isDirty) { e.preventDefault(); e.returnValue = ""; }
+});
+
+async function loadRouting() {
+  try {
+    const [r1, r2] = await Promise.all([
+      fetch("/api/routes").then(r => r.json()),
+      fetch("/api/workspaces").then(r => r.json()),
+    ]);
+    routes = r1 && r1.default ? r1 : routes;
+    workspaces = Array.isArray(r2) ? r2 : (r2.error ? [] : []);
+    renderRouting();
+    // Eager-load doc list for default workspace
+    if (routes.default.workspace_id) ensureDocsLoaded(routes.default.workspace_id);
+  } catch (e) {
+    toast("routing load failed: " + e.message);
+  }
+}
+
+async function ensureDocsLoaded(wsId, refresh) {
+  if (!wsId) return [];
+  if (!refresh && docCacheByWS[wsId]) return docCacheByWS[wsId];
+  const url = "/api/docs?workspace=" + encodeURIComponent(wsId) + (refresh ? "&refresh=1" : "");
+  const r = await fetch(url);
+  const j = await r.json();
+  if (Array.isArray(j)) docCacheByWS[wsId] = j;
+  else docCacheByWS[wsId] = [];
+  return docCacheByWS[wsId];
+}
+
+async function refreshDiscovery() {
+  try {
+    const w = await fetch("/api/workspaces?refresh=1").then(r => r.json());
+    workspaces = Array.isArray(w) ? w : [];
+    // Refresh cached doc lists for any workspace currently referenced
+    docCacheByWS = {};
+    const wsIds = new Set([routes.default.workspace_id, ...routes.mappings.map(m => m.workspace_id)].filter(Boolean));
+    for (const id of wsIds) await ensureDocsLoaded(id, true);
+    renderRouting();
+    toast("refreshed " + workspaces.length + " workspaces");
+  } catch (e) { toast("refresh failed: " + e.message); }
+}
+
+function workspaceLabel(id) {
+  const w = workspaces.find(w => w.id === id);
+  if (!w) return id;
+  // Affine doesn't expose a name; use a short prefix + createdAt
+  return id.slice(0, 8) + "… (created " + (w.createdAt ? w.createdAt.slice(0, 10) : "?") + ")";
+}
+function docLabel(wsId, docId) {
+  if (!docId) return "";
+  const cache = docCacheByWS[wsId] || [];
+  const d = cache.find(d => d.id === docId);
+  if (d) return (d.title || "(untitled)") + "  ·  " + docId;
+  return docId;
+}
+
+function renderRouting() {
+  // banner
+  const banner = document.getElementById("routing-banner");
+  if (routes.mappings.length === 0) {
+    banner.innerHTML = `<div class="banner">No mappings configured — every note routes to the default workspace.</div>`;
+  } else {
+    banner.innerHTML = "";
+  }
+
+  // default row
+  setupCombobox("default-workspace", "default-workspace-suggestions",
+    workspaces.map(w => ({id: w.id, primary: w.id.slice(0, 12) + "…", secondary: "created " + (w.createdAt || "").slice(0, 10)})),
+    routes.default.workspace_id,
+    (newId) => { routes.default.workspace_id = newId; routes.default.parent_doc_id = ""; ensureDocsLoaded(newId); setDirty(true); renderRouting(); },
+    { minChars: 0 });
+  setupDocCombobox("default-parent", "default-parent-suggestions",
+    routes.default.workspace_id, routes.default.parent_doc_id,
+    (newId) => { routes.default.parent_doc_id = newId; setDirty(true); });
+
+  // mappings
+  const list = document.getElementById("mappings-list");
+  list.innerHTML = "";
+  if (routes.mappings.length === 0) {
+    list.innerHTML = `<div class="mappings-empty">No mappings yet. Click "+ Add mapping" to route specific tags to other workspaces.</div>`;
+    return;
+  }
+  routes.mappings.forEach((m, idx) => {
+    const row = document.createElement("div");
+    row.className = "route-row mapping";
+    row.innerHTML = `
+      <div class="order">
+        <button onclick="moveMapping(${idx}, -1)" ${idx === 0 ? "disabled" : ""} title="move up">▲</button>
+        <button onclick="moveMapping(${idx}, 1)" ${idx === routes.mappings.length - 1 ? "disabled" : ""} title="move down">▼</button>
+      </div>
+      <div class="tag-cell"><input type="text" placeholder="tag" value="${esc(m.tag)}" oninput="setMappingTag(${idx}, this.value)"></div>
+      <div class="doc-search-wrap">
+        <input type="text" id="map-ws-${idx}" placeholder="workspace" autocomplete="off">
+        <div class="doc-search-suggestions" id="map-ws-${idx}-suggestions" style="display:none;"></div>
+      </div>
+      <div class="doc-search-wrap">
+        <input type="text" id="map-parent-${idx}" placeholder="parent doc (optional)" autocomplete="off">
+        <div class="doc-search-suggestions" id="map-parent-${idx}-suggestions" style="display:none;"></div>
+      </div>
+      <div class="actions">
+        <button class="danger" onclick="deleteMapping(${idx})">Delete</button>
+      </div>
+    `;
+    list.appendChild(row);
+    setupCombobox("map-ws-" + idx, "map-ws-" + idx + "-suggestions",
+      workspaces.map(w => ({id: w.id, primary: w.id.slice(0, 12) + "…", secondary: "created " + (w.createdAt || "").slice(0, 10)})),
+      m.workspace_id,
+      (newId) => { routes.mappings[idx].workspace_id = newId; routes.mappings[idx].parent_doc_id = ""; ensureDocsLoaded(newId).then(renderRouting); setDirty(true); },
+      { minChars: 0 });
+    setupDocCombobox("map-parent-" + idx, "map-parent-" + idx + "-suggestions",
+      m.workspace_id, m.parent_doc_id,
+      (newId) => { routes.mappings[idx].parent_doc_id = newId; setDirty(true); });
+  });
+}
+
+function setMappingTag(idx, val) { routes.mappings[idx].tag = val; setDirty(true); }
+function moveMapping(idx, dir) {
+  const tgt = idx + dir;
+  if (tgt < 0 || tgt >= routes.mappings.length) return;
+  const m = routes.mappings.splice(idx, 1)[0];
+  routes.mappings.splice(tgt, 0, m);
+  setDirty(true);
+  renderRouting();
+}
+function addMapping() {
+  routes.mappings.push({ tag: "", workspace_id: routes.default.workspace_id, parent_doc_id: "" });
+  setDirty(true);
+  renderRouting();
+}
+function deleteMapping(idx) {
+  if (!confirm("Delete mapping for tag \"" + routes.mappings[idx].tag + "\"?")) return;
+  routes.mappings.splice(idx, 1);
+  setDirty(true);
+  renderRouting();
+}
+
+async function saveRoutes() {
+  try {
+    const r = await fetch("/api/routes", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(routes),
+    });
+    const j = await r.json();
+    if (j.ok) { toast(j.message || "saved"); setDirty(false); }
+    else toast("save failed: " + (j.error || r.statusText));
+  } catch (e) { toast("save error: " + e.message); }
+}
+
+// Combobox: <input> + suggestion <div> below. Items: [{id, primary, secondary}].
+// onPick(newId) fires when user clicks a suggestion or pastes a valid UUID-shaped string.
+function setupCombobox(inputId, suggId, items, currentId, onPick, opts) {
+  opts = opts || {};
+  const minChars = opts.minChars ?? 2;
+  const input = document.getElementById(inputId);
+  const sugg = document.getElementById(suggId);
+  if (!input || !sugg) return;
+  if (currentId) input.value = items.find(i => i.id === currentId)?.primary || currentId;
+  input.dataset.currentId = currentId || "";
+
+  const show = () => {
+    const q = input.value.trim().toLowerCase();
+    if (minChars > 0 && q.length < minChars) { sugg.style.display = "none"; return; }
+    const matches = items.filter(i =>
+      i.id.toLowerCase().includes(q) || (i.primary || "").toLowerCase().includes(q) || (i.secondary || "").toLowerCase().includes(q)
+    ).slice(0, 20);
+    sugg.innerHTML = matches.map(i => `
+      <div data-id="${esc(i.id)}">
+        <div class="doc-title">${esc(i.primary || i.id)}</div>
+        <div class="doc-id">${esc(i.id)}${i.secondary ? " · " + esc(i.secondary) : ""}</div>
+      </div>
+    `).join("");
+    sugg.style.display = matches.length ? "block" : "none";
+    sugg.querySelectorAll("div[data-id]").forEach(d => {
+      d.addEventListener("mousedown", e => {
+        e.preventDefault();
+        const id = d.getAttribute("data-id");
+        input.value = items.find(i => i.id === id)?.primary || id;
+        input.dataset.currentId = id;
+        sugg.style.display = "none";
+        onPick(id);
+      });
+    });
+  };
+  input.addEventListener("focus", show);
+  input.addEventListener("input", () => {
+    show();
+    // If pasted a UUID-ish string, commit immediately.
+    const v = input.value.trim();
+    if (isUUIDish(v) && v !== input.dataset.currentId) {
+      input.dataset.currentId = v;
+      onPick(v);
+    }
+  });
+  input.addEventListener("blur", () => setTimeout(() => sugg.style.display = "none", 150));
+}
+
+// Doc combobox: like setupCombobox but resolves items from docCacheByWS for the chosen workspace.
+function setupDocCombobox(inputId, suggId, wsId, currentDocId, onPick) {
+  const input = document.getElementById(inputId);
+  const sugg = document.getElementById(suggId);
+  if (!input || !sugg) return;
+  const docs = docCacheByWS[wsId] || [];
+  const items = docs.map(d => ({id: d.id, primary: d.title || "(untitled)", secondary: "created " + (d.createdAt || "").slice(0, 10)}));
+  if (currentDocId) input.value = docs.find(d => d.id === currentDocId)?.title || currentDocId;
+  input.dataset.currentId = currentDocId || "";
+  setupCombobox(inputId, suggId, items, currentDocId, onPick, { minChars: 2 });
+}
+
+// --- Init ---
 refresh();
 setInterval(refresh, 5000);
+loadRouting();
 </script>
 </body>
 </html>

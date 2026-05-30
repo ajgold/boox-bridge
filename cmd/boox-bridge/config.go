@@ -75,6 +75,7 @@ func (c *config) DLQDir() string     { return filepath.Join(c.DataDir, "dlq") }
 func (c *config) StateDir() string   { return filepath.Join(c.DataDir, "state") }
 func (c *config) RendersDir() string { return filepath.Join(c.DataDir, "renders") }
 func (c *config) RetryDir() string   { return filepath.Join(c.DataDir, "retry") }
+func (c *config) RoutesPath() string { return filepath.Join(c.StateDir(), "routes.json") }
 
 func envOr(k, def string) string {
 	if v := os.Getenv(k); v != "" {

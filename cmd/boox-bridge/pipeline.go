@@ -25,6 +25,7 @@ type pipeline struct {
 	hwr    *hwrClient
 	affine *affineClient
 	spool  *spool
+	routes *routes
 }
 
 // process runs the full ingest pipeline on a single .note file. Each
@@ -119,10 +120,12 @@ func (p *pipeline) process(ctx context.Context, path string) {
 	// are the canonical signal — Claire's intent.
 	deviceTags := extractBooxTags(path)
 	hwrRes.Tags = mergeTags(deviceTags, hwrRes.Tags)
+	routeWS, routeParent, routeViaTag := p.routes.ResolveVia(hwrRes.Tags)
 	log.Info("hwr_done", "stage", "hwr", "dur_ms", time.Since(tHWR).Milliseconds(),
 		"model", hwrRes.Model, "confidence", hwrRes.Confidence,
 		"illegible", hwrRes.IllegibleCount, "cost_usd", hwrRes.CostUSD,
-		"tags", hwrRes.Tags, "device_tags", deviceTags)
+		"tags", hwrRes.Tags, "device_tags", deviceTags,
+		"route_workspace", routeWS, "route_parent", routeParent, "route_via_tag", routeViaTag)
 
 	// 6. Affine ingest
 	tPub := time.Now()
@@ -142,6 +145,8 @@ func (p *pipeline) process(ctx context.Context, path string) {
 		title = "[needs review] " + title
 	}
 	docID, err := p.affine.publish(ctx, publishReq{
+		WorkspaceID:  routeWS,
+		ParentDocID:  routeParent,
 		Title:        title,
 		BodyMarkdown: hwrRes.BodyMarkdown,
 		Tags:         hwrRes.Tags,

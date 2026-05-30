@@ -33,7 +33,7 @@ require (
 	github.com/teambition/rrule-go v1.8.2 // indirect
 	github.com/yosida95/uritemplate/v3 v3.0.2 // indirect
 	golang.org/x/oauth2 v0.34.0 // indirect
-	golang.org/x/sync v0.13.0 // indirect
+	golang.org/x/sync v0.20.0 // indirect
 	golang.org/x/sys v0.42.0 // indirect
 	modernc.org/gc/v3 v3.0.0 // indirect
 	modernc.org/libc v1.54.5 // indirect

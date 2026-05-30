@@ -76,6 +76,8 @@ func (a *authRoundTripper) RoundTrip(r *http.Request) (*http.Response, error) {
 }
 
 type publishReq struct {
+	WorkspaceID  string // required; resolved per-note by routes.Resolve
+	ParentDocID  string // optional; "" = create at workspace root
 	Title        string
 	BodyMarkdown string
 	Tags         []string
@@ -88,7 +90,10 @@ func (a *affineClient) publish(ctx context.Context, p publishReq) (string, error
 	if err := a.connect(ctx); err != nil {
 		return "", err
 	}
-	docID, err := a.createDoc(ctx, p.Title, p.BodyMarkdown)
+	if p.WorkspaceID == "" {
+		return "", fmt.Errorf("publish: empty WorkspaceID")
+	}
+	docID, err := a.createDoc(ctx, p.WorkspaceID, p.ParentDocID, p.Title, p.BodyMarkdown)
 	if err != nil {
 		return "", fmt.Errorf("create_doc: %w", err)
 	}
@@ -99,11 +104,11 @@ func (a *affineClient) publish(ctx context.Context, p publishReq) (string, error
 		// page unique and dedupes identical pages across notes.
 		sum := sha256.Sum256(png)
 		filename := fmt.Sprintf("boox-page-%d-%s.png", i+1, hex.EncodeToString(sum[:8]))
-		sourceID, err := a.uploadBlob(ctx, filename, "image/png", png)
+		sourceID, err := a.uploadBlob(ctx, p.WorkspaceID, filename, "image/png", png)
 		if err != nil {
 			return docID, fmt.Errorf("upload_blob page %d: %w", i+1, err)
 		}
-		if err := a.appendImage(ctx, docID, sourceID); err != nil {
+		if err := a.appendImage(ctx, p.WorkspaceID, docID, sourceID); err != nil {
 			return docID, fmt.Errorf("append_block page %d: %w", i+1, err)
 		}
 	}
@@ -112,7 +117,7 @@ func (a *affineClient) publish(ctx context.Context, p publishReq) (string, error
 			continue
 		}
 		// Tag failures are best-effort — log via parent context but don't fail publish.
-		_ = a.addTag(ctx, docID, tag)
+		_ = a.addTag(ctx, p.WorkspaceID, docID, tag)
 	}
 	return docID, nil
 }
@@ -163,14 +168,16 @@ func firstText(cs []mcp.Content) string {
 
 // --- Tool wrappers ---
 
-func (a *affineClient) createDoc(ctx context.Context, title, markdown string) (string, error) {
+func (a *affineClient) createDoc(ctx context.Context, workspaceID, parentDocID, title, markdown string) (string, error) {
 	args := map[string]any{
-		"workspaceId": a.cfg.AffineWorkspace,
+		"workspaceId": workspaceID,
 		"title":       title,
 		"markdown":    markdown,
 	}
-	if a.cfg.AffineParentDoc != "" {
-		args["parentDocId"] = a.cfg.AffineParentDoc
+	// Preserve the existing "set only when non-empty" guard — Affine MCP
+	// rejects an explicit empty-string parentDocId.
+	if parentDocID != "" {
+		args["parentDocId"] = parentDocID
 	}
 	var out struct {
 		DocID string `json:"docId"`
@@ -184,9 +191,9 @@ func (a *affineClient) createDoc(ctx context.Context, title, markdown string) (s
 	return out.DocID, nil
 }
 
-func (a *affineClient) uploadBlob(ctx context.Context, filename, contentType string, content []byte) (string, error) {
+func (a *affineClient) uploadBlob(ctx context.Context, workspaceID, filename, contentType string, content []byte) (string, error) {
 	args := map[string]any{
-		"workspaceId": a.cfg.AffineWorkspace,
+		"workspaceId": workspaceID,
 		"filename":    filename,
 		"contentType": contentType,
 		"content":     pngBase64(content),
@@ -211,9 +218,9 @@ func (a *affineClient) uploadBlob(ctx context.Context, filename, contentType str
 	return "", fmt.Errorf("upload_blob returned no key/id")
 }
 
-func (a *affineClient) appendImage(ctx context.Context, docID, sourceID string) error {
+func (a *affineClient) appendImage(ctx context.Context, workspaceID, docID, sourceID string) error {
 	args := map[string]any{
-		"workspaceId": a.cfg.AffineWorkspace,
+		"workspaceId": workspaceID,
 		"docId":       docID,
 		"type":        "image",
 		"sourceId":    sourceID,
@@ -221,13 +228,91 @@ func (a *affineClient) appendImage(ctx context.Context, docID, sourceID string) 
 	return a.callTool(ctx, "append_block", args, nil)
 }
 
-func (a *affineClient) addTag(ctx context.Context, docID, tag string) error {
+func (a *affineClient) addTag(ctx context.Context, workspaceID, docID, tag string) error {
 	args := map[string]any{
-		"workspaceId": a.cfg.AffineWorkspace,
+		"workspaceId": workspaceID,
 		"docId":       docID,
 		"tag":         strings.TrimSpace(tag),
 	}
 	return a.callTool(ctx, "add_tag_to_doc", args, nil)
+}
+
+// --- v0.2: workspace + doc discovery for the routing UI ---
+
+type wsSummary struct {
+	ID        string `json:"id"`
+	Public    bool   `json:"public,omitempty"`
+	CreatedAt string `json:"createdAt,omitempty"`
+}
+
+type docSummary struct {
+	ID        string `json:"id"`
+	Title     string `json:"title,omitempty"`
+	CreatedAt string `json:"createdAt,omitempty"`
+}
+
+func (a *affineClient) listWorkspaces(ctx context.Context) ([]wsSummary, error) {
+	if err := a.connect(ctx); err != nil {
+		return nil, err
+	}
+	// list_workspaces returns the raw array as the text/structured content.
+	var out []wsSummary
+	if err := a.callTool(ctx, "list_workspaces", map[string]any{}, &out); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// docsPage is the GraphQL-shaped paginated list returned by list_docs.
+type docsPage struct {
+	TotalCount int `json:"totalCount"`
+	PageInfo   struct {
+		HasNextPage bool   `json:"hasNextPage"`
+		EndCursor   string `json:"endCursor"`
+	} `json:"pageInfo"`
+	Edges []struct {
+		Cursor string `json:"cursor"`
+		Node   struct {
+			ID        string `json:"id"`
+			Title     string `json:"title"`
+			CreatedAt string `json:"createdAt"`
+		} `json:"node"`
+	} `json:"edges"`
+}
+
+func (a *affineClient) listDocs(ctx context.Context, workspaceID string) ([]docSummary, error) {
+	if err := a.connect(ctx); err != nil {
+		return nil, err
+	}
+	const pageSize = 200
+	const safetyCap = 50 // 200 * 50 = 10k docs is more than enough for a home workspace
+	out := []docSummary{}
+	after := ""
+	for i := 0; i < safetyCap; i++ {
+		args := map[string]any{
+			"workspaceId": workspaceID,
+			"first":       pageSize,
+		}
+		if after != "" {
+			args["after"] = after
+		}
+		var page docsPage
+		if err := a.callTool(ctx, "list_docs", args, &page); err != nil {
+			return nil, err
+		}
+		for _, e := range page.Edges {
+			out = append(out, docSummary{
+				ID:        e.Node.ID,
+				Title:     e.Node.Title,
+				CreatedAt: e.Node.CreatedAt,
+			})
+		}
+		if !page.PageInfo.HasNextPage || page.PageInfo.EndCursor == "" {
+			break
+		}
+		after = page.PageInfo.EndCursor
+	}
+	return out, nil
 }
 
 // healthCheck connects and lists tools to verify the MCP server is up.

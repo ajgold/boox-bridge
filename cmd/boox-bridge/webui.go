@@ -13,7 +13,10 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"time"
+
+	"golang.org/x/sync/singleflight"
 )
 
 //go:embed webui.html
@@ -23,13 +26,33 @@ var webuiHTML []byte
 // boox.jacomail.com (NPM → :3000). No auth in the daemon — relies on NPM
 // access-list or tailnet-only reachability.
 type webServer struct {
-	cfg   *config
-	dedup *dedup
-	spend *spend
+	cfg    *config
+	dedup  *dedup
+	spend  *spend
+	affine *affineClient
+	routes *routes
+
+	// Cached Affine workspace + doc discovery for the routing dropdowns.
+	cacheMu sync.RWMutex
+	wsCache cacheEntry[[]wsSummary]
+	docCache map[string]cacheEntry[[]docSummary]
+	sf      singleflight.Group
 }
 
-func newWebServer(cfg *config, d *dedup, s *spend) *webServer {
-	return &webServer{cfg: cfg, dedup: d, spend: s}
+type cacheEntry[T any] struct {
+	val       T
+	expiresAt time.Time
+}
+
+func newWebServer(cfg *config, d *dedup, s *spend, a *affineClient, r *routes) *webServer {
+	return &webServer{
+		cfg:      cfg,
+		dedup:    d,
+		spend:    s,
+		affine:   a,
+		routes:   r,
+		docCache: make(map[string]cacheEntry[[]docSummary]),
+	}
 }
 
 func (w *webServer) listen(ctx context.Context) error {
@@ -42,6 +65,10 @@ func (w *webServer) listen(ctx context.Context) error {
 	mux.HandleFunc("POST /api/retry", w.handleRetry)
 	mux.HandleFunc("POST /api/skip", w.handleSkip)
 	mux.HandleFunc("POST /api/delete", w.handleDelete)
+	mux.HandleFunc("GET /api/routes", w.handleGetRoutes)
+	mux.HandleFunc("POST /api/routes", w.handlePostRoutes)
+	mux.HandleFunc("GET /api/workspaces", w.handleWorkspaces)
+	mux.HandleFunc("GET /api/docs", w.handleDocs)
 
 	srv := &http.Server{
 		Addr:              w.cfg.WebListenAddr,
@@ -334,4 +361,102 @@ func writeJSON(rw http.ResponseWriter, status int, payload any) {
 
 func writeErr(rw http.ResponseWriter, status int, err error) {
 	writeJSON(rw, status, map[string]any{"ok": false, "error": err.Error()})
+}
+
+// --- v0.2: routing config ---
+
+func (w *webServer) handleGetRoutes(rw http.ResponseWriter, r *http.Request) {
+	writeJSON(rw, http.StatusOK, w.routes.Get())
+}
+
+func (w *webServer) handlePostRoutes(rw http.ResponseWriter, r *http.Request) {
+	var cfg routesConfig
+	dec := json.NewDecoder(r.Body)
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&cfg); err != nil {
+		writeErr(rw, http.StatusBadRequest, fmt.Errorf("decode: %w", err))
+		return
+	}
+	if err := w.routes.Set(cfg); err != nil {
+		writeErr(rw, http.StatusBadRequest, err)
+		return
+	}
+	slog.Info("routes_updated", "mappings", len(cfg.Mappings))
+	writeJSON(rw, http.StatusOK, map[string]any{"ok": true, "message": "routes saved"})
+}
+
+// --- v0.2: workspace + doc discovery for the routing dropdowns ---
+
+const (
+	wsCacheTTL  = time.Hour
+	docCacheTTL = 10 * time.Minute
+)
+
+func (w *webServer) handleWorkspaces(rw http.ResponseWriter, r *http.Request) {
+	refresh := r.URL.Query().Get("refresh") == "1"
+	w.cacheMu.RLock()
+	if !refresh && time.Now().Before(w.wsCache.expiresAt) && w.wsCache.val != nil {
+		val := w.wsCache.val
+		w.cacheMu.RUnlock()
+		writeJSON(rw, http.StatusOK, val)
+		return
+	}
+	w.cacheMu.RUnlock()
+
+	res, err, _ := w.sf.Do("ws:list", func() (any, error) {
+		ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
+		defer cancel()
+		list, err := w.affine.listWorkspaces(ctx)
+		if err != nil {
+			return nil, err
+		}
+		w.cacheMu.Lock()
+		w.wsCache = cacheEntry[[]wsSummary]{val: list, expiresAt: time.Now().Add(wsCacheTTL)}
+		w.cacheMu.Unlock()
+		return list, nil
+	})
+	if err != nil {
+		writeErr(rw, http.StatusBadGateway, err)
+		return
+	}
+	writeJSON(rw, http.StatusOK, res)
+}
+
+func (w *webServer) handleDocs(rw http.ResponseWriter, r *http.Request) {
+	wsID := r.URL.Query().Get("workspace")
+	if wsID == "" {
+		writeErr(rw, http.StatusBadRequest, fmt.Errorf("workspace query param required"))
+		return
+	}
+	refresh := r.URL.Query().Get("refresh") == "1"
+
+	w.cacheMu.RLock()
+	if !refresh {
+		if entry, ok := w.docCache[wsID]; ok && time.Now().Before(entry.expiresAt) && entry.val != nil {
+			val := entry.val
+			w.cacheMu.RUnlock()
+			writeJSON(rw, http.StatusOK, val)
+			return
+		}
+	}
+	w.cacheMu.RUnlock()
+
+	key := "docs:" + wsID
+	res, err, _ := w.sf.Do(key, func() (any, error) {
+		ctx, cancel := context.WithTimeout(r.Context(), 60*time.Second)
+		defer cancel()
+		list, err := w.affine.listDocs(ctx, wsID)
+		if err != nil {
+			return nil, err
+		}
+		w.cacheMu.Lock()
+		w.docCache[wsID] = cacheEntry[[]docSummary]{val: list, expiresAt: time.Now().Add(docCacheTTL)}
+		w.cacheMu.Unlock()
+		return list, nil
+	})
+	if err != nil {
+		writeErr(rw, http.StatusBadGateway, err)
+		return
+	}
+	writeJSON(rw, http.StatusOK, res)
 }

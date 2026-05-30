@@ -60,6 +60,7 @@ Watch for one structured-log line per pipeline stage (`stage=dedup|parse|render|
 
 - `boox-bridge` requires all listed env vars; it `exit 2`s on missing config.
 - `journalctl -u boox-bridge -n 100 --no-pager` for recent activity.
-- `cat /var/lib/boox/state/{seen,spend}.json` for skip-list and daily $-cap state.
+- `cat /var/lib/boox/state/{seen,spend,routes}.json` for skip-list, daily $-cap, and tag-routing state.
 - `ls /var/lib/boox/{inbox/claire,archive,dlq}/` to see the file lifecycle.
 - `notedump <file>` (`go build ./cmd/notedump/`) for ad-hoc parser probing.
+- Hand-edited `routes.json`: apply without restart via `systemctl kill -s HUP boox-bridge`. Daemon logs `routes_reloaded mappings=N` on success or `routes_reload_failed err=…` on validation failure (in which case the previous in-memory config keeps serving).

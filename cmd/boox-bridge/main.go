@@ -9,6 +9,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"os"
 	"os/signal"
@@ -52,6 +53,20 @@ func main() {
 	affine := newAffineClient(cfg)
 	spool := newSpool(cfg)
 
+	routes, err := loadRoutes(cfg.RoutesPath(), routeTarget{
+		WorkspaceID: cfg.AffineWorkspace,
+		ParentDocID: cfg.AffineParentDoc,
+	})
+	if err != nil {
+		if errors.Is(err, errMissingBootstrap) {
+			slog.Error("routes_bootstrap_missing", "err", err)
+		} else {
+			slog.Error("routes_load", "err", err)
+		}
+		os.Exit(1)
+	}
+	slog.Info("routes_loaded", "path", cfg.RoutesPath(), "mappings", len(routes.Get().Mappings))
+
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
@@ -70,11 +85,31 @@ func main() {
 		hwr:    hwr,
 		affine: affine,
 		spool:  spool,
+		routes: routes,
 	}
 
 	go spool.run(ctx)
 
-	web := newWebServer(cfg, dedup, spend)
+	// SIGHUP triggers a reload of routes.json — lets the admin hand-edit
+	// the file and apply changes without a service restart.
+	hup := make(chan os.Signal, 1)
+	signal.Notify(hup, syscall.SIGHUP)
+	go func() {
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-hup:
+				if err := routes.Reload(); err != nil {
+					slog.Error("routes_reload_failed", "err", err)
+				} else {
+					slog.Info("routes_reloaded", "mappings", len(routes.Get().Mappings))
+				}
+			}
+		}
+	}()
+
+	web := newWebServer(cfg, dedup, spend, affine, routes)
 	go func() {
 		if err := web.listen(ctx); err != nil {
 			slog.Error("web_ui_exit", "err", err)
