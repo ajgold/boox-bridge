@@ -28,17 +28,34 @@ type taskLink struct {
 	Page     int    `json:"page"`
 }
 
+// taskForestNote mirrors service.TaskForestNote — provenance for tasks
+// auto-extracted from a ForestNote notebook page (via the lasso → to-do
+// gesture or future paths). All fields optional.
+type taskForestNote struct {
+	NotebookID   string `json:"notebook_id,omitempty"`
+	PageID       string `json:"page_id,omitempty"`
+	NotebookName string `json:"notebook_name,omitempty"`
+	Source       string `json:"source,omitempty"`
+	NativeURL    string `json:"native_url,omitempty"`
+}
+
 // task mirrors service.Task's JSON shape. Kept local so changes to the
 // internal type don't break ub-mcp's compilation.
 type task struct {
-	ID          string     `json:"id"`
-	Title       string     `json:"title"`
-	Status      string     `json:"status"`
-	CreatedAt   time.Time  `json:"created_at"`
-	DueAt       *time.Time `json:"due_at,omitempty"`
-	CompletedAt *time.Time `json:"completed_at,omitempty"`
-	Detail      *string    `json:"detail,omitempty"`
-	Links       *taskLink  `json:"links,omitempty"`
+	ID          string          `json:"id"`
+	Title       string          `json:"title"`
+	Status      string          `json:"status"`
+	CreatedAt   time.Time       `json:"created_at"`
+	DueAt       *time.Time      `json:"due_at,omitempty"`
+	CompletedAt *time.Time      `json:"completed_at,omitempty"`
+	Detail      *string         `json:"detail,omitempty"`
+	Links       *taskLink       `json:"links,omitempty"`
+	URL         *string         `json:"url,omitempty"`
+	Priority    *string         `json:"priority,omitempty"`
+	Categories  []string        `json:"categories,omitempty"`
+	ForestNote  *taskForestNote `json:"forestnote,omitempty"`
+	Comment     string          `json:"comment,omitempty"`
+	Deleted     bool            `json:"deleted,omitempty"`
 }
 
 // formatTask renders a single task as readable text for the agent.
@@ -47,14 +64,46 @@ func formatTask(t task) string {
 	sb.WriteString(fmt.Sprintf("Task: %s\n", t.Title))
 	sb.WriteString(fmt.Sprintf("ID: %s\n", t.ID))
 	sb.WriteString(fmt.Sprintf("Status: %s\n", t.Status))
+	if t.Deleted {
+		sb.WriteString("(deleted — soft-tombstoned, hidden from default views)\n")
+	}
 	if t.DueAt != nil {
 		sb.WriteString(fmt.Sprintf("Due: %s\n", t.DueAt.Format(time.RFC3339)))
 	}
 	if t.CompletedAt != nil && t.Status == "completed" {
 		sb.WriteString(fmt.Sprintf("Completed: %s\n", t.CompletedAt.Format(time.RFC3339)))
 	}
+	if t.Priority != nil && *t.Priority != "" {
+		sb.WriteString(fmt.Sprintf("Priority: %s\n", *t.Priority))
+	}
+	if t.URL != nil && *t.URL != "" {
+		sb.WriteString(fmt.Sprintf("URL: %s\n", *t.URL))
+	}
+	if len(t.Categories) > 0 {
+		sb.WriteString(fmt.Sprintf("Categories: %s\n", strings.Join(t.Categories, ", ")))
+	}
 	if t.Detail != nil && *t.Detail != "" {
 		sb.WriteString(fmt.Sprintf("Detail: %s\n", *t.Detail))
+	}
+	if t.Comment != "" {
+		sb.WriteString(fmt.Sprintf("Comment: %s\n", t.Comment))
+	}
+	if t.ForestNote != nil {
+		if t.ForestNote.NotebookName != "" {
+			sb.WriteString(fmt.Sprintf("From ForestNote notebook: %s (id %s)\n",
+				t.ForestNote.NotebookName, t.ForestNote.NotebookID))
+		} else if t.ForestNote.NotebookID != "" {
+			sb.WriteString(fmt.Sprintf("From ForestNote notebook id: %s\n", t.ForestNote.NotebookID))
+		}
+		if t.ForestNote.PageID != "" {
+			sb.WriteString(fmt.Sprintf("ForestNote page id: %s\n", t.ForestNote.PageID))
+		}
+		if t.ForestNote.Source != "" {
+			sb.WriteString(fmt.Sprintf("ForestNote source: %s\n", t.ForestNote.Source))
+		}
+		if t.ForestNote.NativeURL != "" {
+			sb.WriteString(fmt.Sprintf("ForestNote native URL: %s\n", t.ForestNote.NativeURL))
+		}
 	}
 	if t.Links != nil && t.Links.FilePath != "" {
 		sb.WriteString(fmt.Sprintf("From note: %s (page %d)\n", t.Links.FilePath, t.Links.Page))
@@ -62,8 +111,8 @@ func formatTask(t task) string {
 	return sb.String()
 }
 
-// registerTaskTools wires the seven task-manipulation tools onto an MCP
-// server instance.
+// registerTaskTools wires the task-manipulation tools onto an MCP server
+// instance.
 func registerTaskTools(server *mcp.Server, client *apiClient) {
 	registerListTasks(server, client)
 	registerGetTask(server, client)
@@ -72,6 +121,7 @@ func registerTaskTools(server *mcp.Server, client *apiClient) {
 	registerCompleteTask(server, client)
 	registerDeleteTask(server, client)
 	registerPurgeCompletedTasks(server, client)
+	registerPurgeDeletedTasks(server, client)
 }
 
 // --- list_tasks ---
@@ -80,12 +130,33 @@ type ListTasksInput struct {
 	Status    string `json:"status,omitempty"`     // needs_action | completed | all
 	DueBefore string `json:"due_before,omitempty"` // RFC3339
 	DueAfter  string `json:"due_after,omitempty"`  // RFC3339
+	// ForestNote provenance filters — match tasks that came from a specific
+	// notebook (by ULID or human name), or any task created by a specific
+	// source (e.g. "lasso").
+	NotebookID   string `json:"notebook_id,omitempty"`
+	NotebookName string `json:"notebook_name,omitempty"`
+	Source       string `json:"source,omitempty"`
+	// Category matches a single VTODO CATEGORIES entry (case-sensitive).
+	Category string `json:"category,omitempty"`
+	// Priority matches the VTODO PRIORITY value verbatim ("1".."9").
+	Priority string `json:"priority,omitempty"`
+	// IncludeDeleted surfaces soft-tombstoned rows alongside live ones.
+	// Useful for "what's in the trash" queries and pre-flighting the
+	// purge_deleted_tasks tool. Defaults to false.
+	IncludeDeleted bool `json:"include_deleted,omitempty"`
 }
 
 func registerListTasks(server *mcp.Server, client *apiClient) {
 	mcp.AddTool[ListTasksInput, any](server, &mcp.Tool{
-		Name:        "list_tasks",
-		Description: "List tasks from UltraBridge. Optional filters: status (needs_action / completed / all, default all); due_before and due_after as RFC3339 timestamps. Tasks with no due date are excluded when either due filter is set.",
+		Name: "list_tasks",
+		Description: "List tasks from UltraBridge. Optional filters: " +
+			"status (needs_action / completed / all, default all); " +
+			"due_before / due_after as RFC3339 (tasks with no due date excluded when either is set); " +
+			"notebook_id / notebook_name / source (ForestNote provenance — match tasks created from a specific notebook or input source); " +
+			"category (single VTODO CATEGORIES entry, case-sensitive); " +
+			"priority (VTODO PRIORITY value 1-9); " +
+			"include_deleted=true to surface soft-tombstoned rows (default false). " +
+			"Returns title, status, due/completed times, URL, priority, categories, ForestNote provenance, and detail when present.",
 	}, func(ctx context.Context, req *mcp.CallToolRequest, input ListTasksInput) (*mcp.CallToolResult, any, error) {
 		params := url.Values{}
 		if input.Status != "" {
@@ -96,6 +167,24 @@ func registerListTasks(server *mcp.Server, client *apiClient) {
 		}
 		if input.DueAfter != "" {
 			params.Set("due_after", input.DueAfter)
+		}
+		if input.NotebookID != "" {
+			params.Set("notebook_id", input.NotebookID)
+		}
+		if input.NotebookName != "" {
+			params.Set("notebook_name", input.NotebookName)
+		}
+		if input.Source != "" {
+			params.Set("source", input.Source)
+		}
+		if input.Category != "" {
+			params.Set("category", input.Category)
+		}
+		if input.Priority != "" {
+			params.Set("priority", input.Priority)
+		}
+		if input.IncludeDeleted {
+			params.Set("include_deleted", "true")
 		}
 
 		path := "/api/v1/tasks"
@@ -146,7 +235,7 @@ type GetTaskInput struct {
 func registerGetTask(server *mcp.Server, client *apiClient) {
 	mcp.AddTool[GetTaskInput, any](server, &mcp.Tool{
 		Name:        "get_task",
-		Description: "Fetch a single task by id. Returns the task detail including title, status, due date, detail notes, and any back-reference to the note it was auto-extracted from.",
+		Description: "Fetch a single task by id. Returns the full task surface: title, status, due/completed times, URL, priority, categories, detail, comment, and any ForestNote provenance (notebook id+name, page id, source, native URL) when the task came from a notebook page.",
 	}, func(ctx context.Context, req *mcp.CallToolRequest, input GetTaskInput) (*mcp.CallToolResult, any, error) {
 		if input.ID == "" {
 			return nil, nil, fmt.Errorf("id is required")
@@ -178,14 +267,23 @@ func registerGetTask(server *mcp.Server, client *apiClient) {
 // --- create_task ---
 
 type CreateTaskInput struct {
-	Title string `json:"title"`
-	DueAt string `json:"due_at,omitempty"` // RFC3339; optional
+	Title      string   `json:"title"`
+	DueAt      string   `json:"due_at,omitempty"` // RFC3339; optional
+	Detail     string   `json:"detail,omitempty"`
+	URL        string   `json:"url,omitempty"`
+	Priority   string   `json:"priority,omitempty"`   // VTODO PRIORITY "1".."9"
+	Categories []string `json:"categories,omitempty"` // VTODO CATEGORIES (list)
+	Comment    string   `json:"comment,omitempty"`    // VTODO COMMENT (free-form)
 }
 
 func registerCreateTask(server *mcp.Server, client *apiClient) {
 	mcp.AddTool[CreateTaskInput, any](server, &mcp.Tool{
-		Name:        "create_task",
-		Description: "Create a new task. Requires a title; due_at is optional and must be RFC3339 when provided. The new task syncs to configured CalDAV devices on the next sync cycle.",
+		Name: "create_task",
+		Description: "Create a new task. Requires a title; everything else is optional. " +
+			"due_at must be RFC3339 when provided. " +
+			"url and priority land in dedicated columns (priority is the VTODO PRIORITY value, \"1\"-\"9\"). " +
+			"categories and comment ride in the iCal blob, so they're readable via get_task right after create. " +
+			"The new task syncs to configured CalDAV devices on the next sync cycle.",
 	}, func(ctx context.Context, req *mcp.CallToolRequest, input CreateTaskInput) (*mcp.CallToolResult, any, error) {
 		if input.Title == "" {
 			return nil, nil, fmt.Errorf("title is required")
@@ -197,6 +295,21 @@ func registerCreateTask(server *mcp.Server, client *apiClient) {
 				return nil, nil, fmt.Errorf("due_at must be RFC3339: %w", err)
 			}
 			body["due_at"] = t
+		}
+		if input.Detail != "" {
+			body["detail"] = input.Detail
+		}
+		if input.URL != "" {
+			body["url"] = input.URL
+		}
+		if input.Priority != "" {
+			body["priority"] = input.Priority
+		}
+		if len(input.Categories) > 0 {
+			body["categories"] = input.Categories
+		}
+		if input.Comment != "" {
+			body["comment"] = input.Comment
 		}
 
 		resp, err := client.postJSON(ctx, "/api/v1/tasks", body)
@@ -223,19 +336,32 @@ func registerCreateTask(server *mcp.Server, client *apiClient) {
 // --- update_task ---
 
 // UpdateTaskInput holds the partial-update payload. Omitted pointer fields
-// leave the task unchanged. ClearDueAt wins over DueAt when both are set.
+// leave the task unchanged. ClearXxx flags win over the value pointer when
+// both are set (allows null-ing a column without sending a value).
 type UpdateTaskInput struct {
-	ID         string  `json:"id"`
-	Title      *string `json:"title,omitempty"`
-	DueAt      *string `json:"due_at,omitempty"` // RFC3339
-	ClearDueAt bool    `json:"clear_due_at,omitempty"`
-	Detail     *string `json:"detail,omitempty"`
+	ID            string    `json:"id"`
+	Title         *string   `json:"title,omitempty"`
+	DueAt         *string   `json:"due_at,omitempty"` // RFC3339
+	ClearDueAt    bool      `json:"clear_due_at,omitempty"`
+	Detail        *string   `json:"detail,omitempty"`
+	URL           *string   `json:"url,omitempty"`
+	ClearURL      bool      `json:"clear_url,omitempty"`
+	Priority      *string   `json:"priority,omitempty"`
+	ClearPriority bool      `json:"clear_priority,omitempty"`
+	// Categories: nil = leave unchanged; non-nil (incl. empty slice) =
+	// replace wholesale. Send "categories": [] to clear.
+	Categories   *[]string `json:"categories,omitempty"`
+	Comment      *string   `json:"comment,omitempty"`
+	ClearComment bool      `json:"clear_comment,omitempty"`
 }
 
 func registerUpdateTask(server *mcp.Server, client *apiClient) {
 	mcp.AddTool[UpdateTaskInput, any](server, &mcp.Tool{
-		Name:        "update_task",
-		Description: "Partially update a task. Only supplied fields are changed. Use clear_due_at=true to remove an existing due date (takes priority over due_at when both set). Detail can be cleared by sending an empty string. Title cannot be empty.",
+		Name: "update_task",
+		Description: "Partially update a task. Only supplied fields are changed. " +
+			"Use clear_due_at / clear_url / clear_priority / clear_comment to null out a column (the Clear flag wins over the value pointer when both are set). " +
+			"Categories is wholesale: send a list to replace the existing set, an empty list to clear, or omit to leave unchanged. " +
+			"Detail and comment can be cleared by sending an empty string. Title cannot be empty.",
 	}, func(ctx context.Context, req *mcp.CallToolRequest, input UpdateTaskInput) (*mcp.CallToolResult, any, error) {
 		if input.ID == "" {
 			return nil, nil, fmt.Errorf("id is required")
@@ -257,6 +383,27 @@ func registerUpdateTask(server *mcp.Server, client *apiClient) {
 		}
 		if input.Detail != nil {
 			body["detail"] = *input.Detail
+		}
+		if input.URL != nil {
+			body["url"] = *input.URL
+		}
+		if input.ClearURL {
+			body["clear_url"] = true
+		}
+		if input.Priority != nil {
+			body["priority"] = *input.Priority
+		}
+		if input.ClearPriority {
+			body["clear_priority"] = true
+		}
+		if input.Categories != nil {
+			body["categories"] = *input.Categories
+		}
+		if input.Comment != nil {
+			body["comment"] = *input.Comment
+		}
+		if input.ClearComment {
+			body["clear_comment"] = true
 		}
 		if len(body) == 0 {
 			return nil, nil, fmt.Errorf("no fields to update")
@@ -372,6 +519,50 @@ func registerPurgeCompletedTasks(server *mcp.Server, client *apiClient) {
 		}
 		return &mcp.CallToolResult{
 			Content: []mcp.Content{&mcp.TextContent{Text: "All completed tasks purged.\n"}},
+		}, nil, nil
+	})
+}
+
+// --- purge_deleted_tasks ---
+
+// PurgeDeletedTasksInput controls the age cutoff for the hard-purge. Zero
+// means "use the server default" (30 days). Negative values are rejected
+// server-side.
+type PurgeDeletedTasksInput struct {
+	OlderThanDays int `json:"older_than_days,omitempty"`
+}
+
+func registerPurgeDeletedTasks(server *mcp.Server, client *apiClient) {
+	mcp.AddTool[PurgeDeletedTasksInput, any](server, &mcp.Tool{
+		Name: "purge_deleted_tasks",
+		Description: "PERMANENTLY remove soft-deleted tasks older than older_than_days (default 30, must be > 0). " +
+			"This is the only operation that actually frees rows from the task store — every other 'delete' just tombstones. " +
+			"Irreversible. Returns the number of rows removed. Use this to clear the trash backlog; pair with list_tasks { include_deleted: true } " +
+			"to confirm what's eligible before running.",
+	}, func(ctx context.Context, req *mcp.CallToolRequest, input PurgeDeletedTasksInput) (*mcp.CallToolResult, any, error) {
+		path := "/api/v1/tasks/purge-deleted"
+		if input.OlderThanDays > 0 {
+			path = fmt.Sprintf("%s?older_than_days=%d", path, input.OlderThanDays)
+		}
+		resp, err := client.postJSON(ctx, path, nil)
+		if err != nil {
+			return nil, nil, fmt.Errorf("API request failed: %w", err)
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode != 200 {
+			raw, _ := io.ReadAll(resp.Body)
+			return nil, nil, fmt.Errorf("API returned %d: %s", resp.StatusCode, string(raw))
+		}
+		var body struct {
+			Deleted int64 `json:"deleted"`
+		}
+		if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+			return nil, nil, fmt.Errorf("decode response: %w", err)
+		}
+		return &mcp.CallToolResult{
+			Content: []mcp.Content{&mcp.TextContent{
+				Text: fmt.Sprintf("Hard-purged %d soft-deleted task(s).\n", body.Deleted),
+			}},
 		}, nil, nil
 	})
 }

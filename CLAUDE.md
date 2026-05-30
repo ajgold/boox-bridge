@@ -2,7 +2,7 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
-Last verified: 2026-05-25
+Last verified: 2026-05-29 (taskdb gained ForestNote provenance columns + hard-purge; REST v1 + MCP task surfaces extended with URL/Priority/Categories/Comment writes and purge-deleted)
 
 Platform-neutral note management and task synchronization service supporting Supernote (via Supernote Private Cloud) and Onyx Boox devices. Six subsystems:
 1. **CalDAV task sync** -- CalDAV VTODO over local SQLite task store
@@ -150,8 +150,9 @@ All other configuration (auth, OCR, sources, logging, RAG, chat) is configured v
 - DB timestamps: millisecond UTC unix timestamps, 0 = unset
 - IDs: MD5(title + timestamp) for task IDs (matches Supernote device convention)
 - Supernote quirk: `completed_time` holds creation time; `last_modified` holds actual completion time
-- Soft deletes only: `is_deleted = 'Y'`, never hard delete
-- iCal blob: VTODO round-trip fidelity via `ical_blob` column; DB fields overlaid on read
+- Soft deletes only on the user-facing path: `is_deleted = 'Y'`. The single exception is `taskdb.HardDeleteOlderThan`, called only via `service.PurgeDeleted` → `POST /api/v1/tasks/purge-deleted` / MCP `purge_deleted_tasks`, which permanently removes already-tombstoned rows older than a caller-specified cutoff (default 30 days; rejects `<= 0`).
+- iCal blob: VTODO round-trip fidelity via `ical_blob` column; DB fields overlaid on read. `CATEGORIES`, `COMMENT`, and `X-FORESTNOTE-NATIVE-URL` are deliberately blob-only and parsed at response time via `caldav.ParseBlobMetadata` (no structured column); REST/MCP writes go through `caldav.BuildBlobWithMetadata` (create) / `caldav.MergeBlobMetadataPatch` (update) so other blob properties survive untouched. **The blob never carries `SUMMARY`** — the column-overlay path injects the live Title at serve time (an empty SUMMARY in the blob would round-trip as malformed VTODO per RFC 5545 §3.6.2).
+- ForestNote provenance: `X-FORESTNOTE-{NOTEBOOK-ID,PAGE-ID,NOTEBOOK-NAME,SOURCE}` on inbound VTODOs is lifted into nullable TEXT columns on `tasks` (with a partial index on `forestnote_notebook_id`), powering the `notebook_id` / `notebook_name` / `source` filters on `GET /api/v1/tasks` and `list_tasks`. The raw bytes stay in the blob too.
 
 ### Device Sync (UB-as-SPC server)
 - UB runs the Supernote Private Cloud protocol (`internal/spcserver`); the device connects to UB as its cloud. Tasks, files, and digests sync over that protocol. UB-wins conflict resolution; local SQLite task store (taskdb) is authoritative.

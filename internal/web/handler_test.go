@@ -97,6 +97,14 @@ func (m *mockTaskStore) List(ctx context.Context) ([]taskstore.Task, error) {
 	return result, nil
 }
 
+func (m *mockTaskStore) ListIncludingDeleted(ctx context.Context) ([]taskstore.Task, error) {
+	var result []taskstore.Task
+	for _, t := range m.tasks {
+		result = append(result, *t)
+	}
+	return result, nil
+}
+
 func (m *mockTaskStore) Get(ctx context.Context, taskID string) (*taskstore.Task, error) {
 	if t, ok := m.tasks[taskID]; ok {
 		return t, nil
@@ -127,6 +135,12 @@ func (m *mockTaskStore) Update(ctx context.Context, t *taskstore.Task) error {
 func (m *mockTaskStore) Delete(ctx context.Context, taskID string) error {
 	if t, ok := m.tasks[taskID]; ok {
 		t.IsDeleted = "Y"
+		// Bump LastModified to match the real taskdb.Store.Delete behavior —
+		// the hard-purge age cutoff reads last_modified, so any future test
+		// that exercises Delete-then-HardDelete needs the timestamp updated
+		// when the soft-delete happens (otherwise a never-touched row
+		// inherits LastModified=0 and gets purged on the first cutoff).
+		t.LastModified = sql.NullInt64{Int64: time.Now().UnixMilli(), Valid: true}
 		return nil
 	}
 	return fmt.Errorf("task not found")
@@ -146,6 +160,17 @@ func (m *mockTaskStore) DeleteCompleted(ctx context.Context) (int64, error) {
 	for id, t := range m.tasks {
 		if t.Status.Valid && t.Status.String == "completed" && t.IsDeleted == "N" {
 			m.tasks[id].IsDeleted = "Y"
+			count++
+		}
+	}
+	return count, nil
+}
+
+func (m *mockTaskStore) HardDeleteOlderThan(ctx context.Context, cutoffMs int64) (int64, error) {
+	var count int64
+	for id, t := range m.tasks {
+		if t.IsDeleted == "Y" && t.LastModified.Valid && t.LastModified.Int64 < cutoffMs {
+			delete(m.tasks, id)
 			count++
 		}
 	}

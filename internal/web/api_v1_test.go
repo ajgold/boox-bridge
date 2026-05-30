@@ -2,7 +2,9 @@ package web
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -232,6 +234,129 @@ func TestAPIv1ListTasksFilters(t *testing.T) {
 	})
 }
 
+// TestAPIv1ListTasksForestNoteFilters exercises the new ?notebook_id /
+// ?notebook_name / ?source / ?category / ?priority / ?include_deleted query
+// params introduced alongside FN-side X-FORESTNOTE-* emission.
+func TestAPIv1ListTasksForestNoteFilters(t *testing.T) {
+	h := newTestHandler()
+	tasks := h.tasks.(*mockTaskService)
+	priHigh := "1"
+	priNorm := "5"
+	tasks.tasks = []service.Task{
+		{
+			ID: "f1", Title: "from notebook A (lasso)", Status: service.StatusNeedsAction,
+			Priority: &priHigh, Categories: []string{"work", "urgent"},
+			ForestNote: &service.TaskForestNote{NotebookID: "A", NotebookName: "Project Notes", Source: "lasso"},
+		},
+		{
+			ID: "f2", Title: "from notebook B (lasso)", Status: service.StatusNeedsAction,
+			Priority: &priNorm, Categories: []string{"personal"},
+			ForestNote: &service.TaskForestNote{NotebookID: "B", NotebookName: "Grocery", Source: "lasso"},
+		},
+		{
+			ID: "f3", Title: "non-FN task", Status: service.StatusNeedsAction,
+		},
+		{
+			ID: "f4", Title: "soft-deleted", Status: service.StatusNeedsAction, Deleted: true,
+		},
+	}
+
+	call := func(path string) []service.Task {
+		req := httptest.NewRequest(http.MethodGet, path, nil)
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, req)
+		if w.Code != http.StatusOK {
+			t.Fatalf("%s -> %d body=%s", path, w.Code, w.Body.String())
+		}
+		var got []service.Task
+		if err := json.NewDecoder(w.Body).Decode(&got); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		return got
+	}
+
+	t.Run("notebook_id_filter", func(t *testing.T) {
+		got := call("/api/v1/tasks?notebook_id=A")
+		if len(got) != 1 || got[0].ID != "f1" {
+			t.Errorf("want only f1, got %+v", ids(got))
+		}
+	})
+
+	t.Run("notebook_name_filter", func(t *testing.T) {
+		got := call("/api/v1/tasks?notebook_name=Grocery")
+		if len(got) != 1 || got[0].ID != "f2" {
+			t.Errorf("want only f2, got %+v", ids(got))
+		}
+	})
+
+	t.Run("source_filter", func(t *testing.T) {
+		got := call("/api/v1/tasks?source=lasso")
+		// f1, f2 carry lasso; f3 is non-FN; f4 is hidden.
+		if len(got) != 2 {
+			t.Errorf("want 2 lasso tasks, got %d: %v", len(got), ids(got))
+		}
+	})
+
+	t.Run("category_filter", func(t *testing.T) {
+		got := call("/api/v1/tasks?category=urgent")
+		if len(got) != 1 || got[0].ID != "f1" {
+			t.Errorf("want only f1, got %v", ids(got))
+		}
+	})
+
+	t.Run("priority_filter", func(t *testing.T) {
+		got := call("/api/v1/tasks?priority=1")
+		if len(got) != 1 || got[0].ID != "f1" {
+			t.Errorf("want only f1, got %v", ids(got))
+		}
+	})
+
+	t.Run("include_deleted_surfaces_trash", func(t *testing.T) {
+		got := call("/api/v1/tasks?include_deleted=true")
+		// All four rows visible — f4 included.
+		if len(got) != 4 {
+			t.Errorf("want 4 tasks, got %d: %v", len(got), ids(got))
+		}
+		var sawDeleted bool
+		for _, x := range got {
+			if x.Deleted {
+				sawDeleted = true
+			}
+		}
+		if !sawDeleted {
+			t.Error("expected at least one task with Deleted=true in include_deleted result")
+		}
+	})
+
+	t.Run("default_hides_deleted", func(t *testing.T) {
+		got := call("/api/v1/tasks")
+		if len(got) != 3 {
+			t.Errorf("want 3 (no trash), got %d: %v", len(got), ids(got))
+		}
+		for _, x := range got {
+			if x.Deleted {
+				t.Errorf("default list leaked deleted task %q", x.ID)
+			}
+		}
+	})
+
+	t.Run("filters_compose", func(t *testing.T) {
+		// notebook_id=A + status=needs_action + priority=1 should still be just f1.
+		got := call("/api/v1/tasks?notebook_id=A&status=needs_action&priority=1")
+		if len(got) != 1 || got[0].ID != "f1" {
+			t.Errorf("want only f1, got %v", ids(got))
+		}
+	})
+}
+
+func ids(ts []service.Task) []string {
+	out := make([]string, 0, len(ts))
+	for _, t := range ts {
+		out = append(out, t.ID)
+	}
+	return out
+}
+
 // newHandlerWithLogBuf returns a handler whose logger writes to the returned
 // buffer, so tests can assert on emitted audit lines.
 func newHandlerWithLogBuf() (*Handler, *bytes.Buffer) {
@@ -387,4 +512,214 @@ func TestAuthMiddlewareInstallsIdentity(t *testing.T) {
 	if observed.Method != "bearer" || observed.Label != "test-token" {
 		t.Errorf("identity not propagated: %+v", observed)
 	}
+}
+
+
+// TestAPIv1PurgeDeleted exercises the hard-purge endpoint: default 30-day
+// cutoff when no query param, explicit ?older_than_days=N override, and
+// the rejection of malformed/zero/negative values. We use the mock's
+// purgeDeletedFn hook so we can observe the days that reach the service —
+// the in-memory mock doesn't carry timestamps.
+func TestAPIv1PurgeDeleted(t *testing.T) {
+	t.Run("default cutoff is 30 days", func(t *testing.T) {
+		h := newTestHandler()
+		tasks := h.tasks.(*mockTaskService)
+		var observedDays int
+		tasks.purgeDeletedFn = func(ctx context.Context, days int) (int64, error) {
+			observedDays = days
+			return 7, nil
+		}
+
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/tasks/purge-deleted", nil)
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, req)
+
+		if w.Code != http.StatusOK {
+			t.Fatalf("status=%d, want 200; body=%s", w.Code, w.Body.String())
+		}
+		if observedDays != 30 {
+			t.Errorf("default days: got %d, want 30", observedDays)
+		}
+		var body struct {
+			Deleted int64 `json:"deleted"`
+		}
+		if err := json.NewDecoder(w.Body).Decode(&body); err != nil {
+			t.Fatalf("decode body: %v", err)
+		}
+		if body.Deleted != 7 {
+			t.Errorf("deleted: got %d, want 7", body.Deleted)
+		}
+	})
+
+	t.Run("explicit older_than_days is honored", func(t *testing.T) {
+		h := newTestHandler()
+		tasks := h.tasks.(*mockTaskService)
+		var observedDays int
+		tasks.purgeDeletedFn = func(ctx context.Context, days int) (int64, error) {
+			observedDays = days
+			return 1500, nil
+		}
+
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/tasks/purge-deleted?older_than_days=7", nil)
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, req)
+
+		if w.Code != http.StatusOK {
+			t.Fatalf("status=%d, want 200", w.Code)
+		}
+		if observedDays != 7 {
+			t.Errorf("explicit days: got %d, want 7", observedDays)
+		}
+	})
+
+	t.Run("rejects zero, negative, and non-integer days", func(t *testing.T) {
+		for _, raw := range []string{"0", "-1", "abc", "1.5"} {
+			h := newTestHandler()
+			req := httptest.NewRequest(http.MethodPost,
+				"/api/v1/tasks/purge-deleted?older_than_days="+raw, nil)
+			w := httptest.NewRecorder()
+			h.ServeHTTP(w, req)
+			if w.Code != http.StatusBadRequest {
+				t.Errorf("raw=%q: status=%d, want 400", raw, w.Code)
+			}
+		}
+	})
+
+	t.Run("service error surfaces as 500", func(t *testing.T) {
+		h := newTestHandler()
+		tasks := h.tasks.(*mockTaskService)
+		tasks.purgeDeletedFn = func(ctx context.Context, days int) (int64, error) {
+			return 0, errors.New("disk full")
+		}
+
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/tasks/purge-deleted", nil)
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, req)
+		if w.Code != http.StatusInternalServerError {
+			t.Errorf("status=%d, want 500; body=%s", w.Code, w.Body.String())
+		}
+	})
+}
+
+
+// TestAPIv1CreateTaskNewFields verifies POST /api/v1/tasks accepts the
+// extended write surface (detail, url, priority, categories, comment) and
+// returns them on the created task.
+func TestAPIv1CreateTaskNewFields(t *testing.T) {
+	h := newTestHandler()
+
+	body := `{
+		"title": "rich create",
+		"detail": "ctx body",
+		"url": "https://ub.example/n/abc",
+		"priority": "1",
+		"categories": ["work", "urgent"],
+		"comment": "from a meeting"
+	}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/tasks", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+
+	if w.Code != http.StatusCreated {
+		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+	}
+	var got service.Task
+	if err := json.NewDecoder(w.Body).Decode(&got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if got.Title != "rich create" {
+		t.Errorf("title: %q", got.Title)
+	}
+	if got.Detail == nil || *got.Detail != "ctx body" {
+		t.Errorf("detail: %+v", got.Detail)
+	}
+	if got.URL == nil || *got.URL != "https://ub.example/n/abc" {
+		t.Errorf("url: %+v", got.URL)
+	}
+	if got.Priority == nil || *got.Priority != "1" {
+		t.Errorf("priority: %+v", got.Priority)
+	}
+	if len(got.Categories) != 2 || got.Categories[0] != "work" {
+		t.Errorf("categories: %v", got.Categories)
+	}
+	if got.Comment != "from a meeting" {
+		t.Errorf("comment: %q", got.Comment)
+	}
+}
+
+// TestAPIv1UpdateTaskNewFields verifies PATCH /api/v1/tasks/{id} accepts
+// the same extended fields and respects the Clear* sentinels.
+func TestAPIv1UpdateTaskNewFields(t *testing.T) {
+	h := newTestHandler()
+	tasks := h.tasks.(*mockTaskService)
+	url := "https://old/"
+	prio := "5"
+	tasks.tasks = []service.Task{
+		{
+			ID:         "t1",
+			Title:      "orig",
+			Status:     service.StatusNeedsAction,
+			URL:        &url,
+			Priority:   &prio,
+			Categories: []string{"old"},
+			Comment:    "old comment",
+		},
+	}
+
+	t.Run("patch each new field", func(t *testing.T) {
+		body := `{
+			"url": "https://new/",
+			"priority": "1",
+			"categories": ["new1", "new2"],
+			"comment": "new comment"
+		}`
+		req := httptest.NewRequest(http.MethodPatch, "/api/v1/tasks/t1", strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, req)
+		if w.Code != http.StatusOK {
+			t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+		}
+		var got service.Task
+		if err := json.NewDecoder(w.Body).Decode(&got); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		if got.URL == nil || *got.URL != "https://new/" {
+			t.Errorf("url: %+v", got.URL)
+		}
+		if got.Priority == nil || *got.Priority != "1" {
+			t.Errorf("priority: %+v", got.Priority)
+		}
+		if len(got.Categories) != 2 || got.Categories[0] != "new1" {
+			t.Errorf("categories: %v", got.Categories)
+		}
+		if got.Comment != "new comment" {
+			t.Errorf("comment: %q", got.Comment)
+		}
+	})
+
+	t.Run("clear flags null out columns", func(t *testing.T) {
+		body := `{"clear_url": true, "clear_priority": true, "clear_comment": true}`
+		req := httptest.NewRequest(http.MethodPatch, "/api/v1/tasks/t1", strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, req)
+		if w.Code != http.StatusOK {
+			t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+		}
+		var got service.Task
+		if err := json.NewDecoder(w.Body).Decode(&got); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		if got.URL != nil {
+			t.Errorf("url should be nil: %+v", got.URL)
+		}
+		if got.Priority != nil {
+			t.Errorf("priority should be nil: %+v", got.Priority)
+		}
+		if got.Comment != "" {
+			t.Errorf("comment should be empty: %q", got.Comment)
+		}
+	})
 }

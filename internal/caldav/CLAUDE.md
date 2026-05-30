@@ -1,14 +1,14 @@
 # CalDAV Backend
 
-Last verified: 2026-04-13
+Last verified: 2026-05-29 (ForestNote provenance extractor + BlobMetadata read/build/merge surface)
 
 ## Purpose
 Exposes tasks as a standard CalDAV VTODO collection so any CalDAV client
 (Apple Reminders, Thunderbird, DAVx5, 2Do, Tasks.org) can read and write tasks.
 
 ## Contracts
-- **Exposes**: `Backend` (implements `gocaldav.Backend`), `TaskStore` interface, `SyncNotifier` interface, `ProppatchStub` http middleware
-- **Guarantees**: Single fixed collection at `{prefix}/tasks/`. Only VTODO supported (VEVENT rejected). Writes trigger sync notification (graceful degradation if notifier down). ETags computed from mutable fields. Collection display name is mutable at runtime via client PROPPATCH of `DAV:displayname`.
+- **Exposes**: `Backend` (implements `gocaldav.Backend`), `TaskStore` interface, `SyncNotifier` interface, `ProppatchStub` http middleware. Plus the metadata helpers: `BlobMetadata`, `ParseBlobMetadata(blob) BlobMetadata`, `BuildBlobWithMetadata(taskID, meta) string`, `BlobMetadataPatch`, `MergeBlobMetadataPatch(taskID, existingBlob, patch) string`.
+- **Guarantees**: Single fixed collection at `{prefix}/tasks/`. Only VTODO supported (VEVENT rejected). Writes trigger sync notification (graceful degradation if notifier down). ETags computed from mutable fields. Collection display name is mutable at runtime via client PROPPATCH of `DAV:displayname`. `VTODOToTask` populates the four `Task.ForestNote*` columns from `X-FORESTNOTE-*` properties via `extractForestNoteMetadata` (defensive: missing props leave the columns NULL). `ParseBlobMetadata` and the merge helpers never error — corrupt/blank blobs degrade to zero-value output.
 - **Expects**: A `TaskStore` implementation and a `SyncNotifier`. Caller sets HTTP prefix. Caller wraps the CalDAV `http.Handler` with `ProppatchStub` if PROPPATCH acceptance is desired (it is — see Gotchas).
 
 ## Dependencies
@@ -24,6 +24,10 @@ Exposes tasks as a standard CalDAV VTODO collection so any CalDAV client
 - VTODOToTask serializes the full iCal calendar to ICalBlob for round-trip fidelity of non-modeled properties (DESCRIPTION, PRIORITY, RRULE, X-props, etc.)
 - `ProppatchStub` HTTP middleware intercepts PROPPATCH *before* the go-webdav/caldav handler because that library hard-codes `PropPatch → 501` in its internal backend wrapper (`caldav/server.go:~664`), and that path is not overridable via the public `Backend` interface. Stub emits 207 Multi-Status with HTTP/1.1 200 OK per requested property, and fires an `OnDisplayName` callback for `DAV:displayname` so clients can rename the collection. Callback persists to the settings DB and updates the backend's in-memory `collectionName` via `SetCollectionName` (RWMutex-guarded), so subsequent PROPFINDs reflect the new name without a container restart.
 - Collection name is editable from three surfaces that stay in sync: Settings UI (`caldav_collection_name` field), `PUT /api/config`, and CalDAV PROPPATCH of `DAV:displayname`.
+- **Blob-only metadata split** (2026-05-29): `CATEGORIES`, `COMMENT`, and `X-FORESTNOTE-NATIVE-URL` deliberately have no structured columns and ride in `ical_blob`. The service layer parses them on read via `ParseBlobMetadata`. `X-FORESTNOTE-{NOTEBOOK-ID,PAGE-ID,NOTEBOOK-NAME,SOURCE}` *are* lifted into columns (for indexed filter queries) but the blob still carries the raw bytes — column writes and blob writes both happen.
+- **`BuildBlobWithMetadata` deliberately omits `SUMMARY`**: the blob-overlay path (`taskToVTODOFromBlob`) injects the live Title column at serve time. Emitting an empty `SUMMARY:` would round-trip through strict CalDAV clients as a malformed VTODO (RFC 5545 §3.6.2 disallows empty TEXT SUMMARY).
+- **Patch-shaped merge**: `MergeBlobMetadataPatch` uses pointer fields + explicit `Clear*` flags so the merge can distinguish "leave alone" from "set to empty"; this is load-bearing for partial PATCH on the REST API and prevents silent loss of `CATEGORIES` / `COMMENT` when a partially-corrupt blob slips through `ParseBlobMetadata`'s zero-value fallback.
+- **CATEGORIES uses `TextList()`**, not `Text()` — `Text()` truncates at the first list-separator comma; `TextList()` does the §3.3.11 unescape-and-split correctly.
 
 ## Invariants
 - UID in VTODO maps 1:1 to task_id in DB
@@ -31,6 +35,7 @@ Exposes tasks as a standard CalDAV VTODO collection so any CalDAV client
 - PutCalendarObject is upsert: creates if missing, updates if exists
 - Delete is soft-delete (delegates to store)
 - DB fields always win over blob fields on read (blob is supplementary)
+- `extractForestNoteMetadata` runs on every `VTODOToTask`; tasks that never carried X-FORESTNOTE-* see the four columns as `sql.NullString{}` (not empty string) so `WHERE forestnote_notebook_id IS NOT NULL` is the canonical filter.
 
 ## Gotchas
 - QueryCalendarObjects does basic VTODO filter only; no date-range filtering

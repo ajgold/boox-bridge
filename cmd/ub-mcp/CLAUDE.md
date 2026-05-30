@@ -1,19 +1,30 @@
 # MCP Server (ub-mcp)
 
-Last verified: 2026-05-25 (UB_MCP_API_TOKEN bearer auth added)
+Last verified: 2026-05-29 (task tools: ForestNote provenance + URL/Priority/Categories/Comment write surface + purge_deleted_tasks)
 
 ## Purpose
 Model Context Protocol server that exposes UltraBridge note search and retrieval
 as MCP tools for AI agents (Claude Desktop, Cursor, etc.).
 
 ## Contracts
-- **Exposes**: Twelve MCP tools across three categories.
+- **Exposes**: Thirteen MCP tools across three categories.
   - Notes: `search_notes` (hybrid search), `get_note_pages` (page content), `get_note_image` (JPEG rendering).
   - ForestNote text boxes: `list_text_boxes` (discovery — boxes in a notebook with id/page/text), `edit_text_box` (server-authored edit of a box's text; relayed to devices on next sync, re-indexed; LWW so a newer device edit can override). Both require an active ForestNote source (404 otherwise).
-  - Tasks: `list_tasks`, `get_task`, `create_task`, `update_task`, `complete_task`, `delete_task`, `purge_completed_tasks`. All task mutations propagate to configured CalDAV devices on the next sync cycle (UB-wins). Dates are RFC3339; `update_task.clear_due_at=true` removes an existing due date (wins over `due_at` when both are set).
+  - Tasks: `list_tasks`, `get_task`, `create_task`, `update_task`, `complete_task`, `delete_task`, `purge_completed_tasks`, `purge_deleted_tasks` (new — hard-purges soft-tombstoned rows older than `older_than_days`, default 30; pair with `list_tasks { include_deleted: true }` to confirm targets first; the only operation that frees rows from the store). `list_tasks` gained provenance/metadata filters: `notebook_id`, `notebook_name`, `source`, `category` (case-sensitive equality), `priority` ("1".."9"), `include_deleted`. `get_task` / `list_tasks` outputs surface URL, Priority, Categories, ForestNote provenance (notebook id+name, page id, source, native URL), Comment, and a `deleted` flag. `create_task` / `update_task` accept `url`, `priority`, `categories`, `comment`; update additionally accepts `clear_url`, `clear_priority`, `clear_comment` sentinels (Clear wins over value when both set; mirrors existing `clear_due_at`). `categories` on update is wholesale (send `[]` to clear, omit to leave unchanged). All task mutations propagate to configured CalDAV devices on the next sync cycle (UB-wins). Dates are RFC3339.
   - Two transport modes: stdio (default) and HTTP SSE (`--http` flag).
 - **Guarantees**: All tools delegate to UltraBridge JSON API via HTTP, authenticating with a Bearer token (`UB_MCP_API_TOKEN`) when set, else Basic Auth. Image data returned as base64-encoded embedded images. Error responses use MCP error format.
 - **Expects**: Running UltraBridge instance with JSON API endpoints enabled (requires retriever). Environment variables for API connection.
+
+## Two MCP surfaces — keep in sync
+
+Task tools live in **both** `cmd/ub-mcp/tasks.go` (the standalone sidecar
+binary) and `cmd/ultrabridge/mcptools.go` (the in-process MCP registered
+at `cmd/ultrabridge/main.go:753`, mounted at `/mcp/`). When adding or
+changing a tool, both surfaces must be updated; the input/output JSON
+shapes are mirrored intentionally (the in-process file keeps local
+`mcpTask` / `mcpTaskForestNote` / `mcpTaskLink` types so it doesn't
+import `internal/service`). Drift between the two is a contract bug,
+not a refactor opportunity.
 
 ## Dependencies
 - **Uses**: `github.com/modelcontextprotocol/go-sdk/mcp` (MCP server framework), UltraBridge JSON API (notes: `/api/search`, `/api/notes/pages`, `/api/notes/pages/image`; forestnote: `GET /api/forestnote/text-boxes?notebook=`, `POST /api/forestnote/text-boxes/edit`; tasks: `/api/v1/tasks`, `/api/v1/tasks/{id}`, `/api/v1/tasks/{id}/complete`, `/api/v1/tasks/purge-completed`).

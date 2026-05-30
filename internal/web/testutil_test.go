@@ -6,7 +6,6 @@ import (
 	"io"
 	"log/slog"
 	"strings"
-	"time"
 
 	"github.com/sysop/ultrabridge/internal/logging"
 	"github.com/sysop/ultrabridge/internal/service"
@@ -36,10 +35,20 @@ func newTestHandler() *Handler {
 
 // mockTaskService implements TaskService for testing
 type mockTaskService struct {
-	tasks []service.Task
+	tasks          []service.Task
+	purgeDeletedFn func(ctx context.Context, olderThanDays int) (int64, error)
 }
 
 func (m *mockTaskService) List(ctx context.Context) ([]service.Task, error) {
+	out := m.tasks[:0:0]
+	for _, t := range m.tasks {
+		if !t.Deleted {
+			out = append(out, t)
+		}
+	}
+	return out, nil
+}
+func (m *mockTaskService) ListIncludingDeleted(ctx context.Context) ([]service.Task, error) {
 	return m.tasks, nil
 }
 func (m *mockTaskService) Get(ctx context.Context, id string) (service.Task, error) {
@@ -50,10 +59,32 @@ func (m *mockTaskService) Get(ctx context.Context, id string) (service.Task, err
 	}
 	return service.Task{}, sql.ErrNoRows
 }
-func (m *mockTaskService) Create(ctx context.Context, title string, dueAt *time.Time) (service.Task, error) {
-	t := service.Task{ID: "test-id", Title: title, Status: service.StatusNeedsAction}
-	if dueAt != nil {
-		t.DueAt = dueAt
+func (m *mockTaskService) Create(ctx context.Context, input service.TaskCreate) (service.Task, error) {
+	t := service.Task{
+		ID:     "test-id",
+		Title:  input.Title,
+		Status: service.StatusNeedsAction,
+	}
+	if input.DueAt != nil {
+		t.DueAt = input.DueAt
+	}
+	if input.Detail != "" {
+		d := input.Detail
+		t.Detail = &d
+	}
+	if input.URL != "" {
+		u := input.URL
+		t.URL = &u
+	}
+	if input.Priority != "" {
+		p := input.Priority
+		t.Priority = &p
+	}
+	if len(input.Categories) > 0 {
+		t.Categories = input.Categories
+	}
+	if input.Comment != "" {
+		t.Comment = input.Comment
 	}
 	m.tasks = append(m.tasks, t)
 	return t, nil
@@ -72,6 +103,27 @@ func (m *mockTaskService) Update(ctx context.Context, id string, patch service.T
 			if patch.Detail != nil {
 				m.tasks[i].Detail = patch.Detail
 			}
+			switch {
+			case patch.ClearURL:
+				m.tasks[i].URL = nil
+			case patch.URL != nil:
+				m.tasks[i].URL = patch.URL
+			}
+			switch {
+			case patch.ClearPriority:
+				m.tasks[i].Priority = nil
+			case patch.Priority != nil:
+				m.tasks[i].Priority = patch.Priority
+			}
+			if patch.Categories != nil {
+				m.tasks[i].Categories = *patch.Categories
+			}
+			switch {
+			case patch.ClearComment:
+				m.tasks[i].Comment = ""
+			case patch.Comment != nil:
+				m.tasks[i].Comment = *patch.Comment
+			}
 			return m.tasks[i], nil
 		}
 	}
@@ -88,6 +140,27 @@ func (m *mockTaskService) PurgeCompleted(ctx context.Context) error {
 	}
 	m.tasks = active
 	return nil
+}
+func (m *mockTaskService) PurgeDeleted(ctx context.Context, olderThanDays int) (int64, error) {
+	if olderThanDays <= 0 {
+		return 0, nil
+	}
+	// Mock doesn't model last_modified; the handler tests provide a stubbed
+	// override via purgeDeletedFn when they need to observe the call shape.
+	if m.purgeDeletedFn != nil {
+		return m.purgeDeletedFn(ctx, olderThanDays)
+	}
+	var kept []service.Task
+	var removed int64
+	for _, t := range m.tasks {
+		if t.Deleted {
+			removed++
+			continue
+		}
+		kept = append(kept, t)
+	}
+	m.tasks = kept
+	return removed, nil
 }
 func (m *mockTaskService) BulkComplete(ctx context.Context, ids []string) error { return nil }
 func (m *mockTaskService) BulkDelete(ctx context.Context, ids []string) error   { return nil }

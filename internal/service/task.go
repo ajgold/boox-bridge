@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/sysop/ultrabridge/internal/caldav"
 	"github.com/sysop/ultrabridge/internal/taskstore"
 )
 
@@ -13,11 +14,13 @@ import (
 // This matches the interface defined in internal/caldav/backend.go.
 type TaskStore interface {
 	List(ctx context.Context) ([]taskstore.Task, error)
+	ListIncludingDeleted(ctx context.Context) ([]taskstore.Task, error)
 	Get(ctx context.Context, taskID string) (*taskstore.Task, error)
 	Create(ctx context.Context, t *taskstore.Task) error
 	Update(ctx context.Context, t *taskstore.Task) error
 	Delete(ctx context.Context, taskID string) error
 	DeleteCompleted(ctx context.Context) (int64, error)
+	HardDeleteOlderThan(ctx context.Context, cutoffMs int64) (int64, error)
 }
 
 // SyncNotifier is the interface for triggering device sync.
@@ -54,6 +57,24 @@ func (s *taskService) List(ctx context.Context) ([]Task, error) {
 	return tasks, nil
 }
 
+// ListIncludingDeleted returns soft-deleted rows alongside the live ones.
+// The Deleted field on each Task tells the caller which is which.
+func (s *taskService) ListIncludingDeleted(ctx context.Context) ([]Task, error) {
+	if s.store == nil {
+		return nil, nil
+	}
+	internalTasks, err := s.store.ListIncludingDeleted(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	tasks := make([]Task, len(internalTasks))
+	for i, it := range internalTasks {
+		tasks[i] = mapInternalTask(it)
+	}
+	return tasks, nil
+}
+
 func (s *taskService) Get(ctx context.Context, id string) (Task, error) {
 	if s.store == nil {
 		return Task{}, fmt.Errorf("task store not available")
@@ -65,19 +86,46 @@ func (s *taskService) Get(ctx context.Context, id string) (Task, error) {
 	return mapInternalTask(*t), nil
 }
 
-func (s *taskService) Create(ctx context.Context, title string, dueAt *time.Time) (Task, error) {
+func (s *taskService) Create(ctx context.Context, input TaskCreate) (Task, error) {
 	if s.store == nil {
 		return Task{}, fmt.Errorf("task store not available")
 	}
+	if input.Title == "" {
+		return Task{}, fmt.Errorf("title is required")
+	}
 	now := time.Now().UnixMilli()
 	t := &taskstore.Task{
-		TaskID:    taskstore.GenerateTaskID(title, now),
-		Title:     taskstore.SqlStr(title),
+		TaskID:    taskstore.GenerateTaskID(input.Title, now),
+		Title:     taskstore.SqlStr(input.Title),
 		Status:    taskstore.SqlStr("needsAction"),
 		IsDeleted: "N",
 	}
-	if dueAt != nil {
-		t.DueTime = dueAt.UnixMilli()
+	if input.DueAt != nil {
+		t.DueTime = input.DueAt.UnixMilli()
+	}
+	if input.Detail != "" {
+		t.Detail = taskstore.SqlStr(input.Detail)
+	}
+	// URL → tasks.links column (existing). Priority → tasks.importance
+	// (existing). Both are structured-column-only on write; the blob is
+	// reserved for list-shaped (categories) and free-form (comment) values.
+	if input.URL != "" {
+		t.Links = taskstore.SqlStr(input.URL)
+	}
+	if input.Priority != "" {
+		t.Importance = taskstore.SqlStr(input.Priority)
+	}
+	// CATEGORIES + COMMENT have no structured column — stash them in a
+	// minimal blob so they survive a get_task immediately after create
+	// (without waiting for a CalDAV device round-trip to write a "real" blob).
+	if len(input.Categories) > 0 || input.Comment != "" {
+		blob := caldav.BuildBlobWithMetadata(t.TaskID, caldav.BlobMetadata{
+			Categories: input.Categories,
+			Comment:    input.Comment,
+		})
+		if blob != "" {
+			t.ICalBlob = taskstore.SqlStr(blob)
+		}
 	}
 
 	if err := s.store.Create(ctx, t); err != nil {
@@ -115,6 +163,45 @@ func (s *taskService) Update(ctx context.Context, id string, patch TaskPatch) (T
 	}
 	if patch.Detail != nil {
 		t.Detail = taskstore.SqlStr(*patch.Detail)
+	}
+	switch {
+	case patch.ClearURL:
+		t.Links = taskstore.SqlStr("")
+	case patch.URL != nil:
+		t.Links = taskstore.SqlStr(*patch.URL)
+	}
+	switch {
+	case patch.ClearPriority:
+		t.Importance = taskstore.SqlStr("")
+	case patch.Priority != nil:
+		t.Importance = taskstore.SqlStr(*patch.Priority)
+	}
+
+	// Blob-overlaid metadata (CATEGORIES, COMMENT): only touch the blob when
+	// the patch actually carries one of these fields. Preserves any other
+	// blob-only properties (X-FORESTNOTE-*, etc.) on tasks that arrived via
+	// CalDAV PUT.
+	//
+	// Pass the patch shape straight through — the merge layer needs to
+	// distinguish "leave alone" from "set to empty" per-field so a partial
+	// blob loss can't silently nuke fields the caller didn't ask to touch
+	// (the value-shape BlobMetadata used to lose this distinction at the
+	// merge boundary; the patch-shape API restores it).
+	if patch.Categories != nil || patch.Comment != nil || patch.ClearComment {
+		existing := ""
+		if t.ICalBlob.Valid {
+			existing = t.ICalBlob.String
+		}
+		merged := caldav.MergeBlobMetadataPatch(t.TaskID, existing, caldav.BlobMetadataPatch{
+			CategoriesPtr: patch.Categories,
+			CommentPtr:    patch.Comment,
+			ClearComment:  patch.ClearComment,
+		})
+		if merged == "" {
+			t.ICalBlob = sql.NullString{Valid: false}
+		} else {
+			t.ICalBlob = taskstore.SqlStr(merged)
+		}
 	}
 
 	if err := s.store.Update(ctx, t); err != nil {
@@ -169,6 +256,30 @@ func (s *taskService) PurgeCompleted(ctx context.Context) error {
 	return nil
 }
 
+// PurgeDeleted permanently removes soft-deleted tasks whose last_modified is
+// older than olderThanDays days. Returns the row count. Unlike PurgeCompleted
+// (which soft-deletes completed rows), this is the irreversible end of the
+// pipeline — once removed, the row is gone. A non-positive olderThanDays is
+// rejected to prevent accidentally wiping every ghost regardless of age:
+// callers must specify a window explicitly, even if they want to use 0 via
+// some future "purge everything" toggle.
+func (s *taskService) PurgeDeleted(ctx context.Context, olderThanDays int) (int64, error) {
+	if s.store == nil {
+		return 0, nil
+	}
+	if olderThanDays <= 0 {
+		return 0, fmt.Errorf("older_than_days must be > 0, got %d", olderThanDays)
+	}
+	cutoff := time.Now().Add(-time.Duration(olderThanDays) * 24 * time.Hour).UnixMilli()
+	n, err := s.store.HardDeleteOlderThan(ctx, cutoff)
+	if err != nil {
+		return 0, err
+	}
+	// No notify(): hard-purging soft-deleted rows doesn't change what the
+	// live device sees (those rows were already tombstoned).
+	return n, nil
+}
+
 func (s *taskService) BulkComplete(ctx context.Context, ids []string) error {
 	for _, id := range ids {
 		if err := s.Complete(ctx, id); err != nil {
@@ -198,7 +309,8 @@ func mapInternalTask(it taskstore.Task) Task {
 		ID:        it.TaskID,
 		Title:     it.Title.String,
 		Status:    TaskStatus(it.Status.String),
-		CreatedAt: time.UnixMilli(it.DueTime), // This mapping might need verification
+		CreatedAt: time.UnixMilli(it.CreatedAt), // taskdb.tasks.created_at (was mis-mapped from DueTime)
+		Deleted:   it.IsDeleted == "Y",
 	}
 
 	if it.DueTime > 0 {
@@ -213,6 +325,54 @@ func mapInternalTask(it taskstore.Task) Task {
 
 	if it.Detail.Valid {
 		t.Detail = &it.Detail.String
+	}
+
+	// URL (the VTODO URL property) lives in tasks.links — previously never
+	// surfaced because the response was leaving Task.URL nil.
+	if it.Links.Valid && it.Links.String != "" {
+		u := it.Links.String
+		t.URL = &u
+	}
+
+	// PRIORITY (tasks.importance) — RFC 5545 emits it as a string-coerced
+	// integer "1"-"9"; we pass it through verbatim.
+	if it.Importance.Valid && it.Importance.String != "" {
+		p := it.Importance.String
+		t.Priority = &p
+	}
+
+	// ForestNote provenance block: nil when none of the structured columns
+	// are populated, so non-FN tasks (Apple Reminders, Tasks.org, etc.) drop
+	// the field from the JSON entirely via omitempty.
+	if it.ForestNoteNotebookID.Valid || it.ForestNotePageID.Valid ||
+		it.ForestNoteNotebookName.Valid || it.ForestNoteSource.Valid {
+		t.ForestNote = &TaskForestNote{
+			NotebookID:   it.ForestNoteNotebookID.String,
+			PageID:       it.ForestNotePageID.String,
+			NotebookName: it.ForestNoteNotebookName.String,
+			Source:       it.ForestNoteSource.String,
+		}
+	}
+
+	// Categories + native URL + comment live in the blob (no structured column).
+	// Parse on-read; ParseBlobMetadata returns zero values on any failure so
+	// this path can never crash the response. Blank blob is the common case.
+	if it.ICalBlob.Valid && it.ICalBlob.String != "" {
+		meta := caldav.ParseBlobMetadata(it.ICalBlob.String)
+		if len(meta.Categories) > 0 {
+			t.Categories = meta.Categories
+		}
+		// NativeURL is a sibling of the structured X-FORESTNOTE-* columns —
+		// only attach it when those columns confirm this task is in fact
+		// FN-originated. A blob-only NativeURL with no column-side provenance
+		// would conjure a misleading ForestNote block (just `native_url`,
+		// no notebook context), so we drop it on the floor in that case.
+		if meta.NativeURL != "" && t.ForestNote != nil {
+			t.ForestNote.NativeURL = meta.NativeURL
+		}
+		if meta.Comment != "" {
+			t.Comment = meta.Comment
+		}
 	}
 
 	return t

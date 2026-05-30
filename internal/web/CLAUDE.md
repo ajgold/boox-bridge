@@ -1,6 +1,35 @@
 # internal/web
 
-Last verified: 2026-05-27 (ForestNote Files tab — folder tree + on-the-fly page viewer — and nav group added; Digests tab + device-grouped sidebar nav + source-faceted search; UB-as-SPC server settings card; routes, fragment rendering, source-split Files tabs, Boox processor controls)
+Last verified: 2026-05-29 (REST v1 task surface: ForestNote-provenance + category/priority filters, include_deleted, write-side url/priority/categories/comment + Clear* sentinels, POST /api/v1/tasks/purge-deleted)
+
+## REST v1 task API — write/read surface extensions (2026-05-29)
+
+`GET /api/v1/tasks` gained six query parameters in addition to the existing
+status/due filters:
+
+- `notebook_id`, `notebook_name`, `source` — ForestNote provenance filters
+  (match on the structured columns extracted from `X-FORESTNOTE-*`).
+- `category` — single VTODO CATEGORIES entry (case-sensitive equality,
+  not substring). Post-fetch filter — see `containsCategory` for the
+  scale-ceiling note.
+- `priority` — VTODO PRIORITY value verbatim (`"1"`..`"9"`).
+- `include_deleted` — when truthy (`1`/`true`/`yes`/`on`), pulls via
+  `TaskService.ListIncludingDeleted` so soft-tombstoned rows surface
+  alongside live ones; the response `deleted` flag distinguishes them.
+
+`POST /api/v1/tasks` and `PATCH /api/v1/tasks/{id}` accept the new write
+fields: `url`, `priority`, `categories`, `comment`. PATCH additionally
+accepts `clear_url`, `clear_priority`, `clear_comment` sentinels (Clear
+wins over value when both are set; mirrors the existing `clear_due_at`
+shape). `categories` on PATCH is wholesale — send `[]` to clear, omit to
+leave unchanged. The handler decodes directly into `service.TaskCreate` /
+`service.TaskPatch` so JSON tags stay single-sourced.
+
+New route: `POST /api/v1/tasks/purge-deleted?older_than_days=N`
+(default 30; rejects `N <= 0`). Hard-purges soft-deleted rows whose
+`last_modified` is older than the cutoff. Returns `200` with
+`{"deleted": N}`. This is the only endpoint that triggers a real `DELETE
+FROM tasks` — every other "delete" tombstones.
 
 ## Sidebar nav (device-grouped)
 
