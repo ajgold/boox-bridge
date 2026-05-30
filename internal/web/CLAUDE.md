@@ -1,6 +1,6 @@
 # internal/web
 
-Last verified: 2026-05-29 (REST v1 task surface: ForestNote-provenance + category/priority filters, include_deleted, write-side url/priority/categories/comment + Clear* sentinels, POST /api/v1/tasks/purge-deleted)
+Last verified: 2026-05-29 (REST v1 task surface: ForestNote-provenance + category/priority filters, include_deleted, write-side url/priority/categories/comment + Clear* sentinels, POST /api/v1/tasks/purge-deleted; legacy form-route POST /tasks/purge-deleted + Tasks-tab trash view)
 
 ## REST v1 task API — write/read surface extensions (2026-05-29)
 
@@ -75,6 +75,7 @@ For tests, `LegacyNewHandler` in `handler_test.go` bridges the old 22-argument s
 | POST | `/tasks/{id}/complete` | `handleCompleteTask` | |
 | POST | `/tasks/bulk` | `handleBulkAction` | |
 | POST | `/tasks/purge-completed` | `handlePurgeCompleted` | |
+| POST | `/tasks/purge-deleted` | `handlePurgeDeleted` | Legacy form-route sibling of `POST /api/v1/tasks/purge-deleted`. Hard-codes the 30-day cutoff via `webPurgeDeletedDays` (paired with `purgeDeletedDefaultDays` in `api_v1.go` — keep numerically in sync). HTMX response is empty 200; non-HX redirects to `/`. Backs the "Purge deleted" button on the Tasks tab's trash view. |
 | GET | `/logs` | `handleLogs` (SSE) | Log stream |
 | GET | `/settings` | `handleSettings` | Settings page (config + MCP tokens + UB-as-SPC server card) |
 | POST | `/settings/save` | `handleSettingsSave` | Save config changes. Routes by hidden `section` field: `supernote`, `general`, `boox`, `ub-spc` (UB-as-SPC server config — all restart-required; secret fields keep current value when left blank). |
@@ -290,8 +291,27 @@ should revisit this decision explicitly.
 ## Template data
 
 Shared data in `baseTemplateData`:
-- `tasks` — list of tasks for the task list page
+- `tasks` — list of tasks for the task list page. Pulled via
+  `TaskService.ListIncludingDeleted` (not `List`) so the Tasks tab can
+  render its trash view. Each row carries the `Deleted bool` flag; only
+  `templates/tasks.html` currently consumes this key.
+- `DeletedCount` — `int` count of rows in `tasks` with `Deleted == true`.
+  Surfaced in the "Show deleted (N)" toggle label so the operator sees
+  the backlog size before opting into the view.
 - `BooxNotesPath` — the Boox notes root directory path (may be empty if disabled); used by JavaScript to detect Boox notes
+
+### Tasks tab: trash view (2026-05-29)
+
+`tasks.html` has two independent visibility toggles — **Show completed**
+and **Show deleted (N)** — that compose via `recomputeTaskVisibility()` in
+`layout.html`. `toggleCompleted()` is retained as a back-compat alias.
+Deleted rows in `_task_row.html` carry `data-deleted="true"`, render with
+line-through title + "Deleted" badge, disable the selection checkbox,
+omit the Complete button, and ship with inline `style="display: none;"`
+so a JS-off client never sees them. The `purge-deleted-form` is hidden
+by default and revealed when the toggle is on; its `confirm()` dialog
+states the operation is IRREVERSIBLE (it hits the real `DELETE FROM
+tasks` via `PurgeDeleted`).
 
 ## MCP Token Management (Phase 3c)
 

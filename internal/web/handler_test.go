@@ -400,8 +400,17 @@ func TestGetIndexResponseBodyVerifiesAC41(t *testing.T) {
 	}
 }
 
-// TestGetIndexFiltersDeletedTasks verifies that deleted tasks (IsDeleted="Y") are not shown
-func TestGetIndexFiltersDeletedTasks(t *testing.T) {
+// TestGetIndexRendersDeletedTasksHidden verifies the trash-view contract:
+// deleted tasks ARE rendered into the HTML (so the "Show deleted" toggle
+// can reveal them client-side) but the row carries data-deleted="true"
+// and an inline display:none so they're invisible by default. The
+// DeletedCount data point feeds the toggle's count label.
+//
+// (Pre-change behavior was server-side filtering, asserted by the prior
+// version of this test. That contract is replaced — deleted tasks live
+// in the DOM now so the operator can opt into seeing them without a
+// round-trip.)
+func TestGetIndexRendersDeletedTasksHidden(t *testing.T) {
 	store := newMockTaskStore()
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	broadcaster := logging.NewLogBroadcaster()
@@ -409,42 +418,43 @@ func TestGetIndexFiltersDeletedTasks(t *testing.T) {
 	tasks := service.NewTaskService(store, nil)
 	handler := NewHandler(tasks, nil, nil, nil, nil, "", "", logger, broadcaster)
 
-	// Add a non-deleted task
-	task1 := &taskstore.Task{
+	store.tasks["task-1"] = &taskstore.Task{
 		TaskID:    "task-1",
 		Title:     taskstore.SqlStr("Active task"),
 		Status:    taskstore.SqlStr("needsAction"),
 		IsDeleted: "N",
 	}
-	store.tasks[task1.TaskID] = task1
-
-	// Add a deleted task
-	task2 := &taskstore.Task{
+	store.tasks["task-2"] = &taskstore.Task{
 		TaskID:    "task-2",
 		Title:     taskstore.SqlStr("Deleted task"),
 		Status:    taskstore.SqlStr("needsAction"),
 		IsDeleted: "Y",
 	}
-	store.tasks[task2.TaskID] = task2
 
 	req := httptest.NewRequest("GET", "/", nil)
 	w := httptest.NewRecorder()
 	handler.ServeHTTP(w, req)
 
-	// Verify HTTP response is 200 OK
 	if w.Code != http.StatusOK {
-		t.Errorf("GET / returned status %d, want %d", w.Code, http.StatusOK)
+		t.Fatalf("GET / returned status %d, want %d", w.Code, http.StatusOK)
 	}
-
-	// Verify response body contains the active task
 	body := w.Body.String()
-	if !strings.Contains(body, "Active task") {
-		t.Errorf("Response should contain 'Active task', got:\n%s", body)
-	}
 
-	// Verify response body does NOT contain the deleted task
-	if strings.Contains(body, "Deleted task") {
-		t.Errorf("Response should NOT contain 'Deleted task', got:\n%s", body)
+	// Active task: rendered, no data-deleted="true" attribute on its row.
+	if !strings.Contains(body, "Active task") {
+		t.Errorf("Response should contain 'Active task' title; got:\n%s", body)
+	}
+	// Deleted task: present in the DOM (so the toggle can reveal it) and
+	// carries the data-deleted marker.
+	if !strings.Contains(body, "Deleted task") {
+		t.Errorf("Response should contain 'Deleted task' (rendered hidden); got:\n%s", body)
+	}
+	if !strings.Contains(body, `data-deleted="true"`) {
+		t.Errorf("Deleted task row must carry data-deleted=\"true\"; got:\n%s", body)
+	}
+	// The toggle's "(N deleted)" count badge confirms the data feed.
+	if !strings.Contains(body, "Show deleted") {
+		t.Errorf("Tasks page should render the Show deleted toggle; got:\n%s", body)
 	}
 }
 
@@ -2565,5 +2575,77 @@ func TestHandleSettingsSave_SPC(t *testing.T) {
 	})
 	if cfg.SPCMode != "client" {
 		t.Errorf("absent spc_enabled should disable the server (client); got %q", cfg.SPCMode)
+	}
+}
+
+
+// TestLegacyPurgeDeletedHXReturnsEmptyBody covers POST /tasks/purge-deleted —
+// the form route paired with the trash-view UI in tasks.html. Mirrors the
+// HX-path contract of /tasks/purge-completed: empty 200 body on success so
+// the client-side handler can drop the deleted rows from the DOM (or, in
+// our case, location.reload() to refresh the count).
+func TestLegacyPurgeDeletedHXReturnsEmptyBody(t *testing.T) {
+	store := newMockTaskStore()
+	// Two soft-deleted rows: one ancient (eligible for hard-purge), one fresh.
+	// The mock's HardDeleteOlderThan applies the cutoff predicate; the handler
+	// hard-codes 30 days so the fresh one survives.
+	dayMs := int64(24 * 60 * 60 * 1000)
+	now := time.Now().UnixMilli()
+	store.tasks["ancient-ghost"] = &taskstore.Task{
+		TaskID:       "ancient-ghost",
+		Title:        taskstore.SqlStr("Old"),
+		IsDeleted:    "Y",
+		LastModified: sql.NullInt64{Int64: now - 60*dayMs, Valid: true},
+	}
+	store.tasks["recent-ghost"] = &taskstore.Task{
+		TaskID:       "recent-ghost",
+		Title:        taskstore.SqlStr("Fresh"),
+		IsDeleted:    "Y",
+		LastModified: sql.NullInt64{Int64: now - 5*dayMs, Valid: true},
+	}
+	store.tasks["live"] = &taskstore.Task{
+		TaskID:    "live",
+		Title:     taskstore.SqlStr("Live"),
+		IsDeleted: "N",
+	}
+	handler := LegacyNewHandler(store, nil, nil, nil, nil, nil, nil, nil, nil, "", "", nil, slog.Default(), logging.NewLogBroadcaster(), nil, nil, "", nil, nil, nil, RAGDisplayConfig{}, &appconfig.Config{})
+
+	req := httptest.NewRequest("POST", "/tasks/purge-deleted", nil)
+	req.Header.Set("HX-Request", "true")
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("HX purge returned %d, want %d; body=%s", w.Code, http.StatusOK, w.Body.String())
+	}
+	if body := w.Body.String(); body != "" {
+		t.Errorf("expected empty body, got %q", body)
+	}
+	if _, present := store.tasks["ancient-ghost"]; present {
+		t.Error("ancient-ghost should have been hard-deleted (> 30 days old)")
+	}
+	if _, present := store.tasks["recent-ghost"]; !present {
+		t.Error("recent-ghost should be preserved (within 30-day window)")
+	}
+	if _, present := store.tasks["live"]; !present {
+		t.Error("live row should be untouched")
+	}
+}
+
+// TestLegacyPurgeDeletedNonHXRedirects verifies the non-HX path still
+// returns 303 to / so plain-browser POSTs (no HTMX) get sensible behavior.
+func TestLegacyPurgeDeletedNonHXRedirects(t *testing.T) {
+	store := newMockTaskStore()
+	handler := LegacyNewHandler(store, nil, nil, nil, nil, nil, nil, nil, nil, "", "", nil, slog.Default(), logging.NewLogBroadcaster(), nil, nil, "", nil, nil, nil, RAGDisplayConfig{}, &appconfig.Config{})
+
+	req := httptest.NewRequest("POST", "/tasks/purge-deleted", nil)
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	if w.Code != http.StatusSeeOther {
+		t.Fatalf("non-HX purge returned %d, want %d", w.Code, http.StatusSeeOther)
+	}
+	if loc := w.Header().Get("Location"); loc != "/" {
+		t.Errorf("redirect location is %q, want /", loc)
 	}
 }
