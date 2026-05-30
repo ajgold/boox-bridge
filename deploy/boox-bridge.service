@@ -1,0 +1,26 @@
+[Unit]
+Description=Boox .note -> Affine ingest pipeline
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=boox
+Group=boox
+EnvironmentFile=/etc/boox-bridge/bridge.env
+ExecStart=/usr/local/bin/boox-bridge
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=30
+StandardOutput=journal
+StandardError=journal
+
+# Hardening — daemon only reads inbox, writes archive/dlq/state under DataDir
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+NoNewPrivileges=true
+ReadWritePaths=/var/lib/boox
+
+[Install]
+WantedBy=multi-user.target

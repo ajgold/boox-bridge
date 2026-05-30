@@ -1,0 +1,37 @@
+# /etc/caddy/Caddyfile — minimal WebDAV endpoint for the Boox Note Air4C.
+# NPM terminates TLS at webdav.jacomail.com using the existing *.jacomail.com
+# wildcard cert; Caddy here listens plaintext on :8080 inside LXC 145.
+#
+# Per-user dirs keep multiple devices separate. Only /claire/* is enabled for
+# v0 — add adam/* etc. later by duplicating the route block.
+
+{
+	auto_https off
+	admin off
+	log {
+		output stdout
+		format json
+	}
+}
+
+:8080 {
+	log {
+		output stdout
+		format json
+	}
+
+	# Simple root probe — useful for NPM health-check pings.
+	handle / {
+		respond "boox-bridge webdav endpoint" 200
+	}
+
+	route /claire/* {
+		basicauth {
+			claire {$CLAIRE_HASH}
+		}
+		webdav {
+			prefix /claire
+			root   /var/lib/boox/inbox/claire
+		}
+	}
+}

@@ -1,0 +1,21 @@
+[Unit]
+Description=Caddy WebDAV endpoint for Boox uploads
+Documentation=https://caddyserver.com/docs/
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=notify
+User=boox
+Group=boox
+EnvironmentFile=/etc/caddy/caddy.env
+ExecStart=/usr/local/bin/caddy run --environ --config /etc/caddy/Caddyfile
+ExecReload=/usr/local/bin/caddy reload --config /etc/caddy/Caddyfile --force
+TimeoutStopSec=30s
+LimitNOFILE=1048576
+PrivateTmp=true
+ProtectSystem=full
+ReadWritePaths=/var/lib/boox
+
+[Install]
+WantedBy=multi-user.target
