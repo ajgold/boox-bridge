@@ -400,8 +400,17 @@ func TestGetIndexResponseBodyVerifiesAC41(t *testing.T) {
 	}
 }
 
-// TestGetIndexFiltersDeletedTasks verifies that deleted tasks (IsDeleted="Y") are not shown
-func TestGetIndexFiltersDeletedTasks(t *testing.T) {
+// TestGetIndexRendersDeletedTasksHidden verifies the trash-view contract:
+// deleted tasks ARE rendered into the HTML (so the "Show deleted" toggle
+// can reveal them client-side) but the row carries data-deleted="true"
+// and an inline display:none so they're invisible by default. The
+// DeletedCount data point feeds the toggle's count label.
+//
+// (Pre-change behavior was server-side filtering, asserted by the prior
+// version of this test. That contract is replaced — deleted tasks live
+// in the DOM now so the operator can opt into seeing them without a
+// round-trip.)
+func TestGetIndexRendersDeletedTasksHidden(t *testing.T) {
 	store := newMockTaskStore()
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	broadcaster := logging.NewLogBroadcaster()
@@ -409,42 +418,43 @@ func TestGetIndexFiltersDeletedTasks(t *testing.T) {
 	tasks := service.NewTaskService(store, nil)
 	handler := NewHandler(tasks, nil, nil, nil, nil, "", "", logger, broadcaster)
 
-	// Add a non-deleted task
-	task1 := &taskstore.Task{
+	store.tasks["task-1"] = &taskstore.Task{
 		TaskID:    "task-1",
 		Title:     taskstore.SqlStr("Active task"),
 		Status:    taskstore.SqlStr("needsAction"),
 		IsDeleted: "N",
 	}
-	store.tasks[task1.TaskID] = task1
-
-	// Add a deleted task
-	task2 := &taskstore.Task{
+	store.tasks["task-2"] = &taskstore.Task{
 		TaskID:    "task-2",
 		Title:     taskstore.SqlStr("Deleted task"),
 		Status:    taskstore.SqlStr("needsAction"),
 		IsDeleted: "Y",
 	}
-	store.tasks[task2.TaskID] = task2
 
 	req := httptest.NewRequest("GET", "/", nil)
 	w := httptest.NewRecorder()
 	handler.ServeHTTP(w, req)
 
-	// Verify HTTP response is 200 OK
 	if w.Code != http.StatusOK {
-		t.Errorf("GET / returned status %d, want %d", w.Code, http.StatusOK)
+		t.Fatalf("GET / returned status %d, want %d", w.Code, http.StatusOK)
 	}
-
-	// Verify response body contains the active task
 	body := w.Body.String()
-	if !strings.Contains(body, "Active task") {
-		t.Errorf("Response should contain 'Active task', got:\n%s", body)
-	}
 
-	// Verify response body does NOT contain the deleted task
-	if strings.Contains(body, "Deleted task") {
-		t.Errorf("Response should NOT contain 'Deleted task', got:\n%s", body)
+	// Active task: rendered, no data-deleted="true" attribute on its row.
+	if !strings.Contains(body, "Active task") {
+		t.Errorf("Response should contain 'Active task' title; got:\n%s", body)
+	}
+	// Deleted task: present in the DOM (so the toggle can reveal it) and
+	// carries the data-deleted marker.
+	if !strings.Contains(body, "Deleted task") {
+		t.Errorf("Response should contain 'Deleted task' (rendered hidden); got:\n%s", body)
+	}
+	if !strings.Contains(body, `data-deleted="true"`) {
+		t.Errorf("Deleted task row must carry data-deleted=\"true\"; got:\n%s", body)
+	}
+	// The toggle's "(N deleted)" count badge confirms the data feed.
+	if !strings.Contains(body, "Show deleted") {
+		t.Errorf("Tasks page should render the Show deleted toggle; got:\n%s", body)
 	}
 }
 
