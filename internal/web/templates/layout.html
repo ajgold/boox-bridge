@@ -775,8 +775,11 @@
                 }
                 if (data.forestnote) {
                   var fn = data.forestnote;
-                  // Show FN only when there's actual ongoing work — the
-                  // global bar should disappear when idle, matching SN/Boox.
+                  // Show FN only when there's actual ongoing work — matches
+                  // SN's gate condition (pending|in_flight > 0) and Boox's
+                  // effective behavior (its per-segment gates collectively
+                  // hide the block when every counter is zero). Idle global
+                  // bar = nothing to surface.
                   if (fn.in_flight > 0 || fn.pending > 0) {
                     var fnSegments = ['FN:'];
                     if (fn.in_flight > 0) fnSegments.push(fn.in_flight + ' in progress');

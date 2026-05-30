@@ -81,10 +81,17 @@ type Bridge struct {
 // monotonic since process start (no reset on Stop — caller can diff if it
 // cares about per-window deltas, but the UI only wants "are we busy" and
 // "what's the backlog").
+//
+// Processed counts every page that exited processPage to any terminal state —
+// successful OCR+index+embed AND the delete/blank-prune paths (dropPage) AND
+// hard-error early returns where processPage logged and bailed. This matches
+// "the worker handled it and moved on" rather than "OCR succeeded", which the
+// UI's "N done" label conveys conventionally. If a future caller needs to
+// distinguish OCR-vs-prune, split into separate counters at that time.
 type Status struct {
 	Pending   int   `json:"pending"`    // pages waiting in the channel right now
 	InFlight  int   `json:"in_flight"`  // pages currently being processed
-	Processed int64 `json:"processed"`  // pages that finished since start
+	Processed int64 `json:"processed"`  // pages handled to any terminal state since start (see type doc)
 	Dropped   int64 `json:"dropped"`    // PagesChanged enqueues lost to queue-full
 	Capacity  int   `json:"capacity"`   // channel buffer size (for "queue is X% full")
 }
