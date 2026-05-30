@@ -162,10 +162,22 @@ type openAIRequest struct {
 	// schema — passed through to the model's chat template at render time.
 	// We use it to suppress Qwen3's reasoning/thinking tokens for OCR
 	// (`enable_thinking: false`), which would otherwise produce hundreds of
-	// `<think>...</think>` tokens before the actual transcription. Non-vLLM
-	// OpenAI-compatible endpoints (OpenAI proper, OpenRouter) generally
-	// tolerate unknown JSON keys and treat this as a no-op. omitempty so we
-	// only ship it when explicitly populated.
+	// `<think>...</think>` tokens before the actual transcription.
+	//
+	// Strictness caveat: this is a vLLM-only feature. OpenAI's Chat
+	// Completions has historically ignored unknown top-level fields, but
+	// strictness varies across compatible gateways (OpenRouter, Together,
+	// LiteLLM, Groq, Fireworks, Ollama all differ; OpenAI proper has been
+	// tightening param validation in newer modes). If you point this at a
+	// strict endpoint and OCR starts 400-ing, the cheapest fix is to flip
+	// back to OCRFormatAnthropic, or remove this field — a config gate
+	// would be the principled fix once we have a second vLLM-only feature
+	// to share it.
+	//
+	// JSON encoding: omitempty elides the field when the map is nil; a
+	// non-nil empty map (`map[string]any{}`) still serializes as `{}`.
+	// Today's only writer (recognizeOpenAI) always populates one key, so
+	// the field always ships when format=openai.
 	ChatTemplateKwargs map[string]any `json:"chat_template_kwargs,omitempty"`
 }
 

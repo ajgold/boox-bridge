@@ -36,7 +36,7 @@ func TestRecognizeOpenAI_DisablesQwenThinking(t *testing.T) {
 
 	kwargs, ok := capturedBody["chat_template_kwargs"].(map[string]any)
 	if !ok {
-		t.Fatalf("chat_template_kwargs missing or wrong type; body keys: %v", keysOf(capturedBody))
+		t.Fatalf("chat_template_kwargs missing or wrong type; full body: %+v", capturedBody)
 	}
 	if think, ok := kwargs["enable_thinking"].(bool); !ok || think {
 		t.Errorf("enable_thinking: got %v (type %T), want false (bool)", kwargs["enable_thinking"], kwargs["enable_thinking"])
@@ -65,10 +65,3 @@ func TestRecognizeAnthropic_NoKwargs(t *testing.T) {
 	}
 }
 
-func keysOf(m map[string]any) []string {
-	out := make([]string, 0, len(m))
-	for k := range m {
-		out = append(out, k)
-	}
-	return out
-}
