@@ -134,12 +134,19 @@ func (r *routes) ResolveVia(tags []string) (workspaceID, parentDocID, viaTag str
 	return r.cfg.Default.WorkspaceID, r.cfg.Default.ParentDocID, ""
 }
 
-// Get returns a snapshot of the current config.
+// Get returns a snapshot of the current config. Mappings is always a
+// non-nil slice so the JSON encoder emits "mappings": [] rather than
+// "mappings": null — the UI iterates the field unconditionally.
 func (r *routes) Get() routesConfig {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
-	out := routesConfig{Default: r.cfg.Default}
-	out.Mappings = append([]routeMapping(nil), r.cfg.Mappings...)
+	out := routesConfig{
+		Default:  r.cfg.Default,
+		Mappings: []routeMapping{},
+	}
+	if len(r.cfg.Mappings) > 0 {
+		out.Mappings = append(out.Mappings, r.cfg.Mappings...)
+	}
 	if len(r.cfg.WorkspaceLabels) > 0 {
 		out.WorkspaceLabels = make(map[string]string, len(r.cfg.WorkspaceLabels))
 		for k, v := range r.cfg.WorkspaceLabels {

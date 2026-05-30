@@ -297,8 +297,13 @@ async function loadRouting() {
       fetch("/api/routes").then(r => r.json()),
       fetch("/api/workspaces").then(r => r.json()),
     ]);
-    routes = r1 && r1.default ? r1 : routes;
-    workspaces = Array.isArray(r2) ? r2 : (r2.error ? [] : []);
+    // Defensive: omitempty on the server can produce missing/null fields.
+    routes = {
+      default: (r1 && r1.default) || { workspace_id: "", parent_doc_id: "" },
+      mappings: Array.isArray(r1 && r1.mappings) ? r1.mappings : [],
+      workspace_labels: (r1 && r1.workspace_labels && typeof r1.workspace_labels === "object") ? r1.workspace_labels : {},
+    };
+    workspaces = Array.isArray(r2) ? r2 : [];
     renderRouting();
     // Eager-load doc list for default workspace
     if (routes.default.workspace_id) ensureDocsLoaded(routes.default.workspace_id);
