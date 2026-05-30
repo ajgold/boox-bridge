@@ -192,17 +192,24 @@ func (h *Handler) handleV1ListTasks(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(filtered)
 }
 
-// parseBoolQuery accepts "1"/"true"/"yes" (case-insensitive) as true; anything
-// else is false. Keeps the surface friendly to MCP tools that might send a
-// stringified bool from JSON.
+// parseBoolQuery accepts "1"/"true"/"yes"/"on" (case-insensitive) as true;
+// anything else is false. Keeps the surface friendly to MCP tools that send
+// a stringified bool from JSON ("true") and to HTML form posts where an
+// unchecked checkbox is absent and a checked one sends "on" by default.
 func parseBoolQuery(s string) bool {
 	switch strings.ToLower(s) {
-	case "1", "true", "yes":
+	case "1", "true", "yes", "on":
 		return true
 	}
 	return false
 }
 
+// containsCategory is an O(N) substring match used by the list-tasks
+// filter. Scale ceiling: this runs per-task in the post-fetch filter loop,
+// so the total work is len(tasks) * avg(categories per task). At the
+// current live-server shape (1.5k rows, a few categories per task at most)
+// this is sub-millisecond; if either dimension grows by an order of
+// magnitude, push the filter down into a SQL `category LIKE` index instead.
 func containsCategory(cats []string, want string) bool {
 	for _, c := range cats {
 		if c == want {
@@ -313,11 +320,12 @@ func (h *Handler) handleV1CreateTask(w http.ResponseWriter, r *http.Request) {
 
 	task, err := h.tasks.Create(r.Context(), input)
 	if err != nil {
-		// title-required, future validation errors — surface message to client.
-		if err.Error() == "title is required" {
-			apiError(w, http.StatusBadRequest, err.Error())
-			return
-		}
+		// The handler-level title check above means service.Create's
+		// "title is required" error is unreachable from this path today.
+		// When future validation errors land at the service boundary,
+		// switch to a sentinel error (`errors.Is(err, service.ErrTaskValidation)`)
+		// — string-matching on err.Error() to dispatch 400 vs 500 was already
+		// fragile when chunk 5 introduced it and has now been removed.
 		apiError(w, http.StatusInternalServerError, "failed to create task")
 		return
 	}

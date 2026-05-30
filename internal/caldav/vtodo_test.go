@@ -1135,3 +1135,111 @@ func TestPreserveValueDateRoundTrip(t *testing.T) {
 		}
 	})
 }
+
+
+// TestMergeBlobMetadataPatch_PreservesUntouchedFields is the regression for
+// the "silent CATEGORIES loss on corrupt-blob fallback" review finding: a
+// patch that touches only Comment must not clear CATEGORIES, regardless of
+// what ParseBlobMetadata reads out of the existing blob.
+func TestMergeBlobMetadataPatch_PreservesUntouchedFields(t *testing.T) {
+	t.Run("touching only Comment leaves CATEGORIES alone", func(t *testing.T) {
+		existing := "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:test\r\n" +
+			"BEGIN:VTODO\r\nUID:t1\r\nDTSTAMP:20260101T000000Z\r\n" +
+			"CATEGORIES:work,urgent\r\n" +
+			"END:VTODO\r\nEND:VCALENDAR\r\n"
+		newComment := "fresh note"
+		merged := MergeBlobMetadataPatch("t1", existing, BlobMetadataPatch{
+			CommentPtr: &newComment,
+		})
+		got := ParseBlobMetadata(merged)
+		if len(got.Categories) != 2 || got.Categories[0] != "work" || got.Categories[1] != "urgent" {
+			t.Errorf("CATEGORIES should be preserved when patch touches only Comment; got %v", got.Categories)
+		}
+		if got.Comment != "fresh note" {
+			t.Errorf("Comment should be set; got %q", got.Comment)
+		}
+	})
+
+	t.Run("nil-everywhere patch is a no-op on a clean blob", func(t *testing.T) {
+		existing := "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:test\r\n" +
+			"BEGIN:VTODO\r\nUID:t1\r\nDTSTAMP:20260101T000000Z\r\n" +
+			"CATEGORIES:work\r\nCOMMENT:keep me\r\n" +
+			"X-FORESTNOTE-NATIVE-URL:forestnote://abc/def\r\n" +
+			"END:VTODO\r\nEND:VCALENDAR\r\n"
+		merged := MergeBlobMetadataPatch("t1", existing, BlobMetadataPatch{})
+		got := ParseBlobMetadata(merged)
+		if len(got.Categories) != 1 || got.Categories[0] != "work" {
+			t.Errorf("CATEGORIES drifted: %v", got.Categories)
+		}
+		if got.Comment != "keep me" {
+			t.Errorf("Comment drifted: %q", got.Comment)
+		}
+		if got.NativeURL != "forestnote://abc/def" {
+			t.Errorf("NativeURL drifted: %q", got.NativeURL)
+		}
+	})
+
+	t.Run("ClearComment wins over a nil CommentPtr", func(t *testing.T) {
+		existing := "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:test\r\n" +
+			"BEGIN:VTODO\r\nUID:t1\r\nDTSTAMP:20260101T000000Z\r\n" +
+			"COMMENT:remove me\r\n" +
+			"END:VTODO\r\nEND:VCALENDAR\r\n"
+		merged := MergeBlobMetadataPatch("t1", existing, BlobMetadataPatch{ClearComment: true})
+		got := ParseBlobMetadata(merged)
+		if got.Comment != "" {
+			t.Errorf("ClearComment should null COMMENT; got %q", got.Comment)
+		}
+	})
+
+	t.Run("empty-slice CategoriesPtr clears wholesale", func(t *testing.T) {
+		existing := "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:test\r\n" +
+			"BEGIN:VTODO\r\nUID:t1\r\nDTSTAMP:20260101T000000Z\r\n" +
+			"CATEGORIES:a,b,c\r\n" +
+			"END:VTODO\r\nEND:VCALENDAR\r\n"
+		empty := []string{}
+		merged := MergeBlobMetadataPatch("t1", existing, BlobMetadataPatch{CategoriesPtr: &empty})
+		got := ParseBlobMetadata(merged)
+		if len(got.Categories) != 0 {
+			t.Errorf("empty CategoriesPtr should clear; got %v", got.Categories)
+		}
+	})
+
+	t.Run("corrupt existing blob falls back to fresh build from patch only", func(t *testing.T) {
+		// Important 3 regression — the corrupt-blob path used to inherit a
+		// zero-value meta and silently drop any pre-existing CATEGORIES the
+		// caller hadn't asked to touch. With the patch shape, a "leave
+		// CATEGORIES alone" patch on a corrupt blob simply produces a blob
+		// with no CATEGORIES, NOT a clobbered one — there's no pre-existing
+		// state to preserve, and the caller never claimed there was.
+		newComment := "recovered"
+		merged := MergeBlobMetadataPatch("t1", "this is not iCal at all", BlobMetadataPatch{
+			CommentPtr: &newComment,
+		})
+		got := ParseBlobMetadata(merged)
+		if got.Comment != "recovered" {
+			t.Errorf("recovery should preserve patched Comment: %q", got.Comment)
+		}
+		if len(got.Categories) != 0 {
+			t.Errorf("recovery from corrupt blob should emit empty CATEGORIES: %v", got.Categories)
+		}
+	})
+}
+
+// TestBuildBlobWithMetadata_NoSummary is the regression for the empty-SUMMARY
+// review finding: the placeholder used to be `SUMMARY:` (empty TEXT value)
+// which RFC 5545 §3.6.2 disallows. The blob must omit SUMMARY entirely so
+// the column-overlay path injects the live Title (or skips when Title is
+// empty), keeping strict CalDAV clients happy.
+func TestBuildBlobWithMetadata_NoSummary(t *testing.T) {
+	blob := BuildBlobWithMetadata("t1", BlobMetadata{Comment: "hello"})
+	if blob == "" {
+		t.Fatal("expected non-empty blob")
+	}
+	if strings.Contains(blob, "SUMMARY:\r\n") || strings.Contains(blob, "SUMMARY:\n") {
+		t.Errorf("blob must not carry an empty SUMMARY; got:\n%s", blob)
+	}
+	// And confirm SUMMARY is absent entirely (not just non-empty).
+	if strings.Contains(blob, "SUMMARY:") {
+		t.Errorf("blob should not emit SUMMARY at all (overlay path provides it); got:\n%s", blob)
+	}
+}

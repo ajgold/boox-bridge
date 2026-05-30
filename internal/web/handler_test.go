@@ -135,6 +135,12 @@ func (m *mockTaskStore) Update(ctx context.Context, t *taskstore.Task) error {
 func (m *mockTaskStore) Delete(ctx context.Context, taskID string) error {
 	if t, ok := m.tasks[taskID]; ok {
 		t.IsDeleted = "Y"
+		// Bump LastModified to match the real taskdb.Store.Delete behavior —
+		// the hard-purge age cutoff reads last_modified, so any future test
+		// that exercises Delete-then-HardDelete needs the timestamp updated
+		// when the soft-delete happens (otherwise a never-touched row
+		// inherits LastModified=0 and gets purged on the first cutoff).
+		t.LastModified = sql.NullInt64{Int64: time.Now().UnixMilli(), Valid: true}
 		return nil
 	}
 	return fmt.Errorf("task not found")

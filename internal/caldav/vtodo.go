@@ -361,10 +361,11 @@ func ParseBlobMetadata(blob string) BlobMetadata {
 
 // BuildBlobWithMetadata constructs a minimal VCALENDAR blob carrying only
 // the metadata properties that have no structured column (CATEGORIES,
-// COMMENT, X-FORESTNOTE-NATIVE-URL). The blob piggybacks UID + a placeholder
-// SUMMARY so downstream blob-overlay paths can identify the VTODO; on
-// outbound serve (taskToVTODOFromBlob), DB-authoritative columns overlay on
-// top, so the placeholder gets replaced.
+// COMMENT, X-FORESTNOTE-NATIVE-URL). The blob carries UID + DTSTAMP only;
+// SUMMARY is deliberately omitted so the blob-overlay path (taskToVTODOFromBlob)
+// can inject the live Title column at serve time — emitting an empty
+// `SUMMARY:` here would round-trip through strict CalDAV clients as a
+// malformed VTODO (RFC 5545 §3.6.2 disallows empty TEXT SUMMARY).
 //
 // Returns "" when meta carries no payload — callers should leave ICalBlob
 // NULL in that case rather than store an empty-marker blob.
@@ -379,28 +380,9 @@ func BuildBlobWithMetadata(taskID string, meta BlobMetadata) string {
 	todo := ical.NewComponent("VTODO")
 	todo.Props.SetText("UID", taskID)
 	todo.Props.SetDateTime("DTSTAMP", time.Now().UTC())
-	// SUMMARY is required by some strict parsers; the blob-overlay path will
-	// replace it with the live Title column on serve, so the placeholder is
-	// invisible to clients.
-	todo.Props.SetText("SUMMARY", "")
 
 	if len(meta.Categories) > 0 {
-		// Emit CATEGORIES as a single multi-value property — go-ical's
-		// SetText escapes per-RFC. Build the comma-joined value manually so
-		// escapes are applied to each item before joining (commas inside a
-		// category value need to be escaped to `\,`).
-		parts := make([]string, 0, len(meta.Categories))
-		for _, c := range meta.Categories {
-			if c == "" {
-				continue
-			}
-			parts = append(parts, escapeICalText(c))
-		}
-		if len(parts) > 0 {
-			p := ical.NewProp("CATEGORIES")
-			p.Value = strings.Join(parts, ",")
-			todo.Props.Set(p)
-		}
+		setCategoriesProp(todo, meta.Categories)
 	}
 	if meta.Comment != "" {
 		todo.Props.SetText("COMMENT", meta.Comment)
@@ -420,52 +402,93 @@ func BuildBlobWithMetadata(taskID string, meta BlobMetadata) string {
 	return buf.String()
 }
 
-// MergeBlobMetadata takes an existing blob and overlays the supplied metadata
-// fields on top, preserving any other properties (X-FORESTNOTE-*, PRIORITY,
-// etc.) that were already in the VTODO. Used on Update to keep the rest of
-// the blob intact when the caller patches just CATEGORIES or COMMENT.
+// BlobMetadataPatch is the patch-shaped sibling of BlobMetadata used by
+// MergeBlobMetadataPatch. Each field is a pointer so the merge can
+// distinguish "leave the existing value alone" (nil) from "replace with
+// this, even if empty" (non-nil). This matters because the parse → merge
+// → re-serialize cycle on Update would otherwise lose CATEGORIES or COMMENT
+// when a partial-corrupt blob slips through ParseBlobMetadata's defensive
+// zero-value fallback: a "leave alone" semantic that's only expressible
+// at the patch boundary prevents the silent clear.
 //
-// If existingBlob is empty/corrupt, falls back to BuildBlobWithMetadata so the
-// update still produces a valid blob carrying the new metadata.
-func MergeBlobMetadata(taskID, existingBlob string, meta BlobMetadata) string {
+// CategoriesPtr semantics: nil = unchanged, non-nil (incl. empty slice) =
+// replace wholesale. Matches the *[]string contract on service.TaskPatch.
+type BlobMetadataPatch struct {
+	CategoriesPtr *[]string
+	CommentPtr    *string
+	// ClearComment forces COMMENT removal even when CommentPtr is nil.
+	// Maps the Clear* sentinel pattern used at the service/REST layer.
+	ClearComment bool
+	NativeURLPtr *string
+}
+
+// MergeBlobMetadataPatch takes an existing blob and applies only the fields
+// the caller explicitly asked to touch — preserving CATEGORIES, COMMENT, and
+// X-FORESTNOTE-NATIVE-URL when the patch leaves them at nil, regardless of
+// what the parsed blob's metadata says. All other properties on the VTODO
+// (X-FORESTNOTE-NOTEBOOK-ID, PRIORITY, VALARM children, etc.) survive
+// untouched.
+//
+// On a corrupt/empty existing blob, falls back to BuildBlobWithMetadata with
+// the patch's non-nil fields synthesized into a fresh BlobMetadata — a
+// partial blob loss can't silently revive cleared categories, since the
+// caller never asked for them in the first place.
+func MergeBlobMetadataPatch(taskID, existingBlob string, patch BlobMetadataPatch) string {
+	fresh := BlobMetadata{}
+	if patch.CategoriesPtr != nil {
+		fresh.Categories = *patch.CategoriesPtr
+	}
+	if patch.CommentPtr != nil && !patch.ClearComment {
+		fresh.Comment = *patch.CommentPtr
+	}
+	if patch.NativeURLPtr != nil {
+		fresh.NativeURL = *patch.NativeURLPtr
+	}
+
 	if existingBlob == "" {
-		return BuildBlobWithMetadata(taskID, meta)
+		return BuildBlobWithMetadata(taskID, fresh)
 	}
 	cal, err := ical.NewDecoder(strings.NewReader(existingBlob)).Decode()
 	if err != nil {
-		return BuildBlobWithMetadata(taskID, meta)
+		return BuildBlobWithMetadata(taskID, fresh)
 	}
 	todo, err := FindVTODO(cal)
 	if err != nil || todo == nil {
-		return BuildBlobWithMetadata(taskID, meta)
+		return BuildBlobWithMetadata(taskID, fresh)
 	}
 
-	// Replace CATEGORIES wholesale: a partial update on this list-shaped
-	// property would be confusing (add vs remove individual entries needs a
-	// richer API). The caller patches the whole set.
-	todo.Props.Del("CATEGORIES")
-	if len(meta.Categories) > 0 {
-		parts := make([]string, 0, len(meta.Categories))
-		for _, c := range meta.Categories {
-			if c == "" {
-				continue
-			}
-			parts = append(parts, escapeICalText(c))
-		}
-		if len(parts) > 0 {
-			p := ical.NewProp("CATEGORIES")
-			p.Value = strings.Join(parts, ",")
-			todo.Props.Set(p)
+	// CATEGORIES: only touch when the caller asked. Replace wholesale on a
+	// non-nil patch (matching the service-layer *[]string contract);
+	// preserve the existing values when nil.
+	if patch.CategoriesPtr != nil {
+		todo.Props.Del("CATEGORIES")
+		if len(*patch.CategoriesPtr) > 0 {
+			setCategoriesProp(todo, *patch.CategoriesPtr)
 		}
 	}
 
-	todo.Props.Del("COMMENT")
-	if meta.Comment != "" {
-		todo.Props.SetText("COMMENT", meta.Comment)
+	// COMMENT: ClearComment always wins; otherwise touch only when CommentPtr
+	// is non-nil. Empty *CommentPtr clears as well — RFC 5545 disallows empty
+	// COMMENT TEXT so empty-string is equivalent to absent.
+	switch {
+	case patch.ClearComment:
+		todo.Props.Del("COMMENT")
+	case patch.CommentPtr != nil:
+		todo.Props.Del("COMMENT")
+		if *patch.CommentPtr != "" {
+			todo.Props.SetText("COMMENT", *patch.CommentPtr)
+		}
 	}
 
-	if meta.NativeURL != "" {
-		todo.Props.SetText("X-FORESTNOTE-NATIVE-URL", meta.NativeURL)
+	// X-FORESTNOTE-NATIVE-URL: same pattern as COMMENT. No write path in the
+	// service layer offers this today (NativeURL is FN-emitted via CalDAV
+	// PUT only), but the merge contract is now symmetric — a future "clear"
+	// flag wouldn't need to revisit this code.
+	if patch.NativeURLPtr != nil {
+		todo.Props.Del("X-FORESTNOTE-NATIVE-URL")
+		if *patch.NativeURLPtr != "" {
+			todo.Props.SetText("X-FORESTNOTE-NATIVE-URL", *patch.NativeURLPtr)
+		}
 	}
 
 	var buf bytes.Buffer
@@ -473,6 +496,28 @@ func MergeBlobMetadata(taskID, existingBlob string, meta BlobMetadata) string {
 		return existingBlob // pessimistic: keep old blob on encoder failure
 	}
 	return buf.String()
+}
+
+// setCategoriesProp installs (or replaces) a CATEGORIES multi-value property
+// on the given VTODO, escaping each list item per RFC 5545 §3.3.11 before
+// the comma-join (so a category value containing a literal comma round-trips
+// as `\,` instead of being treated as a list separator). No-op when cats is
+// empty after filtering blanks; callers Del the existing prop first if a
+// total clear is intended.
+func setCategoriesProp(todo *ical.Component, cats []string) {
+	parts := make([]string, 0, len(cats))
+	for _, c := range cats {
+		if c == "" {
+			continue
+		}
+		parts = append(parts, escapeICalText(c))
+	}
+	if len(parts) == 0 {
+		return
+	}
+	p := ical.NewProp("CATEGORIES")
+	p.Value = strings.Join(parts, ",")
+	todo.Props.Set(p)
 }
 
 // escapeICalText applies RFC 5545 §3.3.11 TEXT escaping (backslash, comma,

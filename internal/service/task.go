@@ -181,25 +181,22 @@ func (s *taskService) Update(ctx context.Context, id string, patch TaskPatch) (T
 	// the patch actually carries one of these fields. Preserves any other
 	// blob-only properties (X-FORESTNOTE-*, etc.) on tasks that arrived via
 	// CalDAV PUT.
+	//
+	// Pass the patch shape straight through — the merge layer needs to
+	// distinguish "leave alone" from "set to empty" per-field so a partial
+	// blob loss can't silently nuke fields the caller didn't ask to touch
+	// (the value-shape BlobMetadata used to lose this distinction at the
+	// merge boundary; the patch-shape API restores it).
 	if patch.Categories != nil || patch.Comment != nil || patch.ClearComment {
 		existing := ""
 		if t.ICalBlob.Valid {
 			existing = t.ICalBlob.String
 		}
-		// Start from existing blob's metadata so unspecified fields survive
-		// the merge. ParseBlobMetadata returns zero-values on parse failure,
-		// which is fine — the merge falls back to a fresh build.
-		meta := caldav.ParseBlobMetadata(existing)
-		if patch.Categories != nil {
-			meta.Categories = *patch.Categories
-		}
-		switch {
-		case patch.ClearComment:
-			meta.Comment = ""
-		case patch.Comment != nil:
-			meta.Comment = *patch.Comment
-		}
-		merged := caldav.MergeBlobMetadata(t.TaskID, existing, meta)
+		merged := caldav.MergeBlobMetadataPatch(t.TaskID, existing, caldav.BlobMetadataPatch{
+			CategoriesPtr: patch.Categories,
+			CommentPtr:    patch.Comment,
+			ClearComment:  patch.ClearComment,
+		})
 		if merged == "" {
 			t.ICalBlob = sql.NullString{Valid: false}
 		} else {
@@ -365,10 +362,12 @@ func mapInternalTask(it taskstore.Task) Task {
 		if len(meta.Categories) > 0 {
 			t.Categories = meta.Categories
 		}
-		if meta.NativeURL != "" {
-			if t.ForestNote == nil {
-				t.ForestNote = &TaskForestNote{}
-			}
+		// NativeURL is a sibling of the structured X-FORESTNOTE-* columns —
+		// only attach it when those columns confirm this task is in fact
+		// FN-originated. A blob-only NativeURL with no column-side provenance
+		// would conjure a misleading ForestNote block (just `native_url`,
+		// no notebook context), so we drop it on the floor in that case.
+		if meta.NativeURL != "" && t.ForestNote != nil {
 			t.ForestNote.NativeURL = meta.NativeURL
 		}
 		if meta.Comment != "" {
