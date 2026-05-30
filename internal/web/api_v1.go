@@ -204,12 +204,14 @@ func parseBoolQuery(s string) bool {
 	return false
 }
 
-// containsCategory is an O(N) substring match used by the list-tasks
-// filter. Scale ceiling: this runs per-task in the post-fetch filter loop,
-// so the total work is len(tasks) * avg(categories per task). At the
-// current live-server shape (1.5k rows, a few categories per task at most)
-// this is sub-millisecond; if either dimension grows by an order of
-// magnitude, push the filter down into a SQL `category LIKE` index instead.
+// containsCategory is an O(N) per-task equality scan used by the
+// list-tasks filter (case-sensitive — matches the wire-level CATEGORIES
+// value verbatim). Scale ceiling: this runs per-task in the post-fetch
+// filter loop, so the total work is len(tasks) * avg(categories per task).
+// At the current live-server shape (1.5k rows, a few categories per task
+// at most) this is sub-millisecond; if either dimension grows by an order
+// of magnitude, push the filter down into a SQL `category LIKE` index
+// instead.
 func containsCategory(cats []string, want string) bool {
 	for _, c := range cats {
 		if c == want {
