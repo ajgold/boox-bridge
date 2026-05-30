@@ -70,10 +70,11 @@ type Bridge struct {
 	wg     sync.WaitGroup
 
 	// Counters for Status(). All atomics so callers (web /files/status
-	// poller, MCP) can read without coordinating with the worker.
-	inFlight  atomic.Int64 // pages currently inside processPage
-	processed atomic.Int64 // pages that have finished (success or warned)
-	dropped   atomic.Int64 // PagesChanged enqueues lost to a full queue
+	// poller, MCP) can read without coordinating with the worker. See the
+	// Status type doc for the exact semantics of each.
+	inFlight  atomic.Int64
+	processed atomic.Int64
+	dropped   atomic.Int64
 }
 
 // Status is a point-in-time snapshot of the bridge's work counters. Pending is
