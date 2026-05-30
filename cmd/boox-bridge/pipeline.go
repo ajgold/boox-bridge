@@ -11,6 +11,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/sysop/ultrabridge/internal/booxnote"
@@ -96,10 +97,15 @@ func (p *pipeline) process(ctx context.Context, path string) {
 		p.fail(log, path, "hwr", err, t0)
 		return
 	}
+	// Merge Boox device tags (read directly from the .note ZIP's tag/pb/*
+	// protobuf) with any tags the HWR model spotted on the page. Boox tags
+	// are the canonical signal — Claire's intent.
+	deviceTags := extractBooxTags(path)
+	hwrRes.Tags = mergeTags(deviceTags, hwrRes.Tags)
 	log.Info("hwr_done", "stage", "hwr", "dur_ms", time.Since(tHWR).Milliseconds(),
 		"model", hwrRes.Model, "confidence", hwrRes.Confidence,
 		"illegible", hwrRes.IllegibleCount, "cost_usd", hwrRes.CostUSD,
-		"tags", hwrRes.Tags)
+		"tags", hwrRes.Tags, "device_tags", deviceTags)
 
 	// 6. Affine ingest
 	tPub := time.Now()
@@ -218,3 +224,29 @@ func copyAndRemove(src, dst string) error {
 // pngBase64 is a small helper used by hwr.go when packing images into
 // the Claude Messages payload. Kept here to share buffer reuse.
 func pngBase64(b []byte) string { return base64.StdEncoding.EncodeToString(b) }
+
+// mergeTags returns the union of a and b in stable order (a first), case-
+// preserving but case-insensitive for dedup so "adam" and "Adam" collapse.
+func mergeTags(a, b []string) []string {
+	seen := make(map[string]struct{}, len(a)+len(b))
+	out := make([]string, 0, len(a)+len(b))
+	add := func(s string) {
+		s = strings.TrimSpace(s)
+		if s == "" {
+			return
+		}
+		key := strings.ToLower(s)
+		if _, ok := seen[key]; ok {
+			return
+		}
+		seen[key] = struct{}{}
+		out = append(out, s)
+	}
+	for _, s := range a {
+		add(s)
+	}
+	for _, s := range b {
+		add(s)
+	}
+	return out
+}
